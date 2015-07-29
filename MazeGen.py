@@ -75,8 +75,45 @@ dimensions = 2
 point_dict, fork_list = MazeGen().generate(fork_length, fork_number, dimensions)
 
 
-#Debug list
-sorted_dict = sorted(point_dict.items(), key=operator.itemgetter(1))
-for key, value in sorted_dict:
-    print key, value
-print fork_list
+class Curves(object):
+    def __init__(self, point_dict, fork_list):
+        self.point_dict = point_dict
+        self.fork_list = fork_list
+        self.sorted_dict = sorted(self.point_dict.items(), key=lambda e: e[1][1])
+    
+    def draw(self):
+
+        last_fork = -1
+        point_list = {}
+        
+        while self.sorted_dict:
+            current_point = self.sorted_dict.pop(0)
+            current_coordinates = current_point[0]
+            current_sequence = current_point[1][0]
+            current_fork = current_point[1][1]
+            if current_fork != last_fork:
+                self._pymel_curve(point_list, last_fork)
+                last_fork = current_fork
+                point_list = {}
+            point_list[current_coordinates] = current_sequence
+        self._pymel_curve(point_list, current_fork)
+        
+    def _pymel_curve(self, point_list, fork_number):
+        point_list = sorted(point_list, key=point_list.get)
+        if fork_number >= 0:
+            point_list_sorted = [self.fork_list[fork_number]]+point_list
+            
+        if len(point_list) > 1:
+            dimensions = len(point_list_sorted[0])
+            if dimensions < 3:
+                if dimensions == 2:
+                    point_list_sorted = tuple((i[0], 0, i[1]) for i in point_list_sorted)
+                else:
+                    point_list_sorted = tuple((i[0], 0, 0) for i in point_list_sorted)
+            elif dimensions > 3:
+                point_list_sorted = tuple(i[:3] for i in point_list_sorted)
+            
+            new_curve = pm.curve(n='fork{}'.format(fork_number), p=point_list_sorted, d=1)
+
+
+Curves(point_dict, fork_list).draw()
