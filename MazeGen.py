@@ -1,119 +1,148 @@
 from __future__ import division
-import random, operator
+import random
+import pymel.core as py
 
-def calculate_directions(dimensions):
-    """Return a list of possible directions (non diagonal) for any dimensions.
-    For example, in 2 dimensions, you can go up (0, 1), down (0, -1), left (-1, 0), or right (1, 0).
-    """
-    direction_list = []
-    dimensions = int(dimensions)
-    for i in range(dimensions):
-        direction_positive = []
-        direction_negative = []
-        for j in range(dimensions):
-            direction_value = int(i == j)
-            direction_positive.append(direction_value)
-            direction_negative.append(-direction_value)
-        direction_list += [tuple(direction_positive), tuple(direction_negative)]
-    return tuple(direction_list)
+class Node:
+    def __init__(self, id, location, size, distance=0, parent=None, children=None):
+        self.id = id
+        self.location = tuple(location)
+        self.size = size
+        self.parent = parent
+        self.distance = distance
+        self.children = children if children else []
+    def __repr__(self):
+        return 'Node(id={x.id}, distance={x.distance}, location={x.location}, size={x.size}, parent={x.parent}, children={x.children}'.format(x=self)
+    def update_parent(self, parent, node_list):
+        self.parent = parent
+        self.distance = node_list[parent].distance + 1
 
+class GenerationCore:
+    def __init__(self, dimensions, nodes=[]):
+        self.nodes = nodes
+        self.dimensions = dimensions
+        self.range = range(dimensions)
+        self.directions = self._possible_directions()
+        
+    def _possible_directions(self):
+        directions = []
+        for i in self.range:
+            for j in (-1, 1):
+                directions.append([j if i == n else 0 for n in self.range])
+        return directions
 
-
-class MazeGen(object):
-    def __init__(self):
-        self.point_dict = {}
-        self.fork_list = []
-        #self.point_dict[coordinate] = (sequence_number, fork_number, size)
-        self.failed_attempts = 0
+def collision_check(gc_instance, location, size, bounds=None):
+    if bounds:
+        for i in gc_instance.range:
+            if not bounds[0][i] + size <= location[i] <= bounds[1][i] - size:
+                return True
+    for node in gc_instance.nodes:
+        size_total = size + node.size
+        distance = [abs(a - b) for a, b in zip(location, node.location)]
+        if max(distance) > size_total:
+            continue
+        distance_total = sum(pow(i, 2) for i in distance)
+        if distance_total < pow(size_total, 2):
+            return True
+    return False
     
-    def generate(self, fork_length, fork_number, dimensions, fork_start=None,
-                  direction_retries=4):
-        
-        if not isinstance(fork_start, (tuple, list)) or len(fork_start) != dimensions:
-            fork_start = [0]*dimensions
-        
-        #Initial calculations
-        r_choice = random.choice
-        self.direction_list = calculate_directions(dimensions)
-        self.point_dict[tuple(fork_start)] = (0, -1, 1)
-        range_fork_number = tuple(range(fork_number))
-        range_fork_length = tuple(range(fork_length))
-        add_fork = self.fork_list.append
-        
-        
-        for f_n in range_fork_number:
-            point_current = r_choice(self.point_dict.keys())
-            point_sequence = self.point_dict[point_current][0]
-            point_fork = self.point_dict[point_current][1]
-            add_fork((point_fork, point_sequence))
+class MayaDraw:
+    def __init__(self, gc_instance):
+        self._gc = gc_instance
+        self._cubes = {}
+    
+    def cubes(self):
+        for node in self._gc.nodes:
+            size = node.size * 1.98
+            new_cube = pm.polyCube(w=size, h=size, d=size)[0]
+            pm.move(new_cube, node.location)
+            id = node.id
+            if id in self._cubes:
+                pm.delete(id)
+            self._cubes[node.id] = new_cube
+    
+    def curves(self):
+        curve_list = []
+        for i, node in enumerate(self._gc.nodes):
             
-            for f_l in range_fork_length:
+            if node.id not in self._gc.nodes[i-1].children:
+                try:
+                    start_point = [self._gc.nodes[self._gc.nodes[i].parent].location]
+                except TypeError:
+                    start_point = []
+                curve_list.append(start_point)
                 
-                #Calculate new direction
-                point_next = self._new_direction(point_current, direction_retries)
-                if point_next is not None:
-                    point_sequence += 1
-                    point_current = point_next
-                    self.point_dict[point_current] = (point_sequence, f_n, 1)
-                    
-                    
-        return (self.point_dict, tuple(self.fork_list))
+            curve_list[-1].append(node.location)
+            
+        for curves in curve_list:
+            if self._gc.dimensions == 2:
+                curves_3d = [(i[0], i[1], 0.0) for i in curves]
+            else:
+                curves_3d = [tuple(i[:3]) for i in curves]
+            if len(curves) > 1:
+                pm.curve(p=curves_3d, d=1)
         
-        
-    def _new_direction(self, point_current, direction_retries):
-        for i in range(direction_retries):
-            new_direction = r_choice(self.direction_list)
-            new_coordinates = tuple(x+y for x, y in zip(point_current, new_direction))
-            if new_coordinates not in self.point_dict:
-                return new_coordinates
-            self.failed_attempts += 1
+
+generation = GenerationCore(2)
+
+max_nodes = 10
+min_nodes = 0
+max_fails = 500
+max_length = 1
+
+start_size = 0.5
+size_reduction = 0.9
+min_size = 0.01
+
+#bounds = ((-1, -1, -1), (10, 10, 10))
+bounds = None
 
 
-fork_length = 10
-fork_number = 3
-dimensions = 2
-point_dict, fork_list = MazeGen().generate(fork_length, fork_number, dimensions)
+
+max_retries = generation.dimensions * 2
+start_location = [0.0 for i in generation.range]
 
 
-class Curves(object):
-    def __init__(self, point_dict, fork_list):
-        self.point_dict = point_dict
-        self.fork_list = fork_list
-        self.sorted_dict = sorted(self.point_dict.items(), key=lambda e: e[1][1])
+total_nodes = failed_nodes = current_length = current_retries = 0
+
+generation.nodes.append(Node(0, start_location, start_size))
+while (total_nodes + failed_nodes < max_nodes 
+       or total_nodes < min_nodes and failed_nodes < max_fails):
     
-    def draw(self):
+    if current_retries >= max_retries:
+        current_length = max_length
+        current_retries = 0
+        failed_nodes += 1
+    if current_length >= max_length:
+        node_id = random.randint(0, total_nodes)
+        current_length = 0
+    else:
+        node_id = total_nodes
+    
+    node_start = generation.nodes[node_id]
+    
+    new_direction = random.choice(generation.directions)
+    
+    new_size = node_start.size * size_reduction
+    if new_size < min_size:
+        current_retries = max_retries
+        failed_nodes += 1
+        continue
+    new_location = tuple(a + b * node_start.size * 2 for a, b in zip(node_start.location, new_direction))
+    
+    
+    if collision_check(generation, new_location, new_size, bounds):
+        current_retries += 1
+        continue
+    
+    total_nodes += 1
+    current_length += 1
+    new_id = generation.nodes[-1].id + 1
+    new_node = Node(new_id, new_location, new_size)
+    new_node.update_parent(node_id, generation.nodes)
+    node_start.children.append(new_id)
+    generation.nodes.append(new_node)
 
-        last_fork = -1
-        point_list = {}
-        
-        while self.sorted_dict:
-            current_point = self.sorted_dict.pop(0)
-            current_coordinates = current_point[0]
-            current_sequence = current_point[1][0]
-            current_fork = current_point[1][1]
-            if current_fork != last_fork:
-                self._pymel_curve(point_list, last_fork)
-                last_fork = current_fork
-                point_list = {}
-            point_list[current_coordinates] = current_sequence
-        self._pymel_curve(point_list, current_fork)
-        
-    def _pymel_curve(self, point_list, fork_number):
-        point_list = sorted(point_list, key=point_list.get)
-        if fork_number >= 0:
-            point_list_sorted = [self.fork_list[fork_number]]+point_list
-            
-        if len(point_list) > 1:
-            dimensions = len(point_list_sorted[0])
-            if dimensions < 3:
-                if dimensions == 2:
-                    point_list_sorted = tuple((i[0], 0, i[1]) for i in point_list_sorted)
-                else:
-                    point_list_sorted = tuple((i[0], 0, 0) for i in point_list_sorted)
-            elif dimensions > 3:
-                point_list_sorted = tuple(i[:3] for i in point_list_sorted)
-            
-            new_curve = pm.curve(n='fork{}'.format(fork_number), p=point_list_sorted, d=1)
 
+md = MayaDraw(generation)
+md.cubes()
 
-Curves(point_dict, fork_list).draw()
