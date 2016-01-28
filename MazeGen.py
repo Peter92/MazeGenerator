@@ -102,6 +102,12 @@ class MayaDraw:
             self._cubes[node.id] = new_cube
             pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
             pm.setAttr('{}.gen_id'.format(new_cube), id)
+            if self._gc.dimensions > 3:
+                visible_key = node.location[3]
+                time_gap = max(1.5, node.size)
+                pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key - time_gap)
+                pm.setKeyframe(new_cube, attribute='visibility', value=1, time=visible_key)
+                pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key + time_gap)
 
     
     def curves(self):
