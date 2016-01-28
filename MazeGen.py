@@ -10,6 +10,7 @@ class Node:
         self.parent = parent
         self.distance = distance
         self.children = children if children else []
+        self.tree = None
     def __repr__(self):
         return 'Node(id={x.id}, distance={x.distance}, location={x.location}, size={x.size}, parent={x.parent}, children={x.children}'.format(x=self)
     def update_parent(self, parent, node_list):
@@ -22,7 +23,7 @@ class GenerationCore:
         self.dimensions = dimensions
         self.range = range(dimensions)
         self.directions = self._possible_directions()
-        
+    
     def _possible_directions(self):
         directions = []
         for i in self.range:
@@ -40,12 +41,14 @@ def format_location(coordinate, dx=0.0, dy=0.0, dz=0.0):
     else:
         return tuple(coordinate[:3])
         
-def collision_check(gc_instance, location, size, bounds=None):
+def collision_check(gc_instance, node_ids, location, size, bounds=None):
     if bounds:
         for i in gc_instance.range:
             if not bounds[0][i] + size <= location[i] <= bounds[1][i] - size:
                 return True
-    for node in gc_instance.nodes:
+    
+    for node_id in node_ids:
+        node = gc_instance.nodes[node_id]
         size_total = size + node.size
         distance = [abs(a - b) for a, b in zip(location, node.location)]
         if max(distance) > size_total:
@@ -92,13 +95,14 @@ class MayaDraw:
         for node in self._gc.nodes:
             size = node.size * 1.98
             new_cube = pm.polyCube(w=size, h=size, d=size)[0]
-            pm.move(new_cube, node.location)
+            pm.move(new_cube, format_location(node.location))
             id = node.id
             if id in self._cubes:
                 pm.delete(id)
             self._cubes[node.id] = new_cube
             pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
             pm.setAttr('{}.gen_id'.format(new_cube), id)
+
     
     def curves(self):
         curve_list = []
@@ -117,21 +121,162 @@ class MayaDraw:
             if len(curves) > 1:
                 converted_coordinates = [format_location(coordinate) for coordinate in curves]
                 pm.curve(p=converted_coordinates, d=1)
-        
 
+
+
+class CoordinateToSegment:
+    def __init__(self, dimensions, tree_data):
+        self.td = tree_data
+        self.dimensions = dimensions
+        self._range = range(dimensions)
+        n = 0
+        self.paths = {}
+        for path in self._paths():
+            self.paths[tuple(path)] = n
+            n += 1
+
+    def convert(self, coordinates, point_size):
+        """Convert a coordinate into segments."""
+        if len(coordinates) != self.dimensions:
+            raise ValueError('invalid coordinate size')
+        segments = []
+        for i in self._range:
+            segments.append(self._find_segment(coordinates[i], point_size))
+        min_len = min(len(i) for i in segments)
+        segments = [tuple(i[:min_len]) for i in segments]
+        path = [self.paths[i] for i in zip(*segments)]
+        return path
+
+    def reverse(self, segment):
+        """Undo conversion for debugging."""
+        segments = [k for i in segment for k, v in self.paths.iteritems() if v == i]
+        joined_segments = []
+        for i in range(self.dimensions):
+            joined_segments.append([j[i] for j in segments])
+        totals = []
+        for coordinate in joined_segments:
+            n = self.td.size - 1
+            total = 0
+            for i in coordinate:
+                total += 2 ** n * i
+                n -= 1
+            totals.append(total)
+        print totals
+            
+    def _paths(self, current_path=None, current_level=0):
+        """Generate a list of paths in the current dimension."""
+        if current_path is None:
+            current_path = []
+        n = (-1, 1)
+        if current_level == self.dimensions:
+            return [current_path]
+        return_path = []
+        for i in n:
+             return_path += self._paths(current_path + [i], current_level + 1)
+        return return_path
+
+    def _find_segment(self, coordinate, point_size):
+        """Convert a number into the correct segment."""
+        total = 0
+        path = []
+        coordinate_min, coordinate_max = sorted((coordinate - point_size,
+                                                 coordinate + point_size))
+        for i in range(self.td.size - self.td.min):
+            current_range = 2 ** (self.td.size - i - 1)
+            if coordinate == total or coordinate_min < total < coordinate_max:
+                return path
+            elif coordinate_max < total:
+                total -= current_range
+                path.append(-1)
+            elif coordinate_min > total:
+                total += current_range
+                path.append(1)
+            else:
+                raise ValueError('problem with coordinate conversion')
+        return path
+
+def get_recursive_items(tree, items=None):
+    if items is None:
+        items = []
+    try:
+        for branch in tree:
+            items += get_recursive_items(branch)
+    except TypeError:
+        items += tree
+    return items
+
+class TreeData:
+
+    def __init__(self, gc_instance, start_size, min_size=None):
+        self._gc = gc_instance
+        self._conversion = CoordinateToSegment(self._gc.dimensions, self)
+        if min_size is None:
+            min_size = start_size
+        self.size = start_size
+        self.min = min_size
+        self._branch_length = range(len(self._conversion.paths) + 1)
+        self.data = [[] for i in self._branch_length]
+    
+    def adjust_size(self, coordinate):
+        start_size = self.size
+        highest_coord = max(coordinate)
+        lowest_coord = min(coordinate)
+        max_range = 2 ** self.size
+        while max_range < highest_coord or -max_range > lowest_coord:
+            self.size += 1
+            max_range = 2 ** self.size
+        return self.size - start_size
+    
+    def recalculate(self):
+        """Recalculate the path to every point."""
+        self.data = [[] for i in self._branch_length]
+        for node in self._gc.nodes:
+            path = self.calculate(node.location, node.size)
+            self.add(node, path)
+    
+    def add(self, node, path):
+        """Add a node to the tree."""
+        node.tree = path
+        branch = self._recursive_branch(path)
+        branch[-1].append(node.id)
+
+    def calculate(self, location, size):
+        """Calculate the path to a point with location and size."""
+        if self.adjust_size(location):
+            self.recalculate()
+        path = self._conversion.convert(location, size)
+        return path
+        
+    def near(self, path):
+        """Find all nodes below a recursive path, used in conjunction with calculate."""
+        branch = self._recursive_branch(path)
+        nearby_nodes = get_recursive_items(branch)
+        return nearby_nodes
+    
+    def _recursive_branch(self, path):
+        branch = self.data
+        for branch_id in path:
+            if not branch[branch_id]:
+                branch[branch_id] = [[] for i in self._branch_length]
+            branch = branch[branch_id]
+        return branch
+        
+        
+        
 generation = GenerationCore(3)
+tree = TreeData(generation, 0, -3)
 
 max_nodes = 1000
 min_nodes = 0
 max_fails = 500
-max_length = 20
+max_length = 1000
 
-start_size = 0.5
+start_size = 10
 size_reduction = 0.98
-min_size = 0.01
+min_size = start_size / 20
 
 bounds = ((-1, -1, -1), (4, 4, 4))
-#bounds = None
+bounds = None
 
 
 
@@ -142,6 +287,7 @@ start_location = [0.0 for i in generation.range]
 total_nodes = failed_nodes = current_length = current_retries = 0
 
 generation.nodes.append(Node(0, start_location, start_size))
+tree.recalculate()
 while (total_nodes + failed_nodes < max_nodes 
        or total_nodes < min_nodes and failed_nodes < max_fails):
     
@@ -166,8 +312,9 @@ while (total_nodes + failed_nodes < max_nodes
         continue
     new_location = tuple(a + b * node_start.size * 2 for a, b in zip(node_start.location, new_direction))
     
-    
-    if collision_check(generation, new_location, new_size, bounds):
+    node_path = tree.calculate(new_location, new_size)
+    near_nodes = tree.near(node_path)
+    if collision_check(generation, near_nodes, new_location, new_size, bounds):
         current_retries += 1
         continue
     
@@ -178,10 +325,12 @@ while (total_nodes + failed_nodes < max_nodes
     new_node.update_parent(node_id, generation.nodes)
     node_start.children.append(new_id)
     generation.nodes.append(new_node)
-
+    tree.add(new_node, node_path)
 
 md = MayaDraw(generation)
-md.cubes()
+
+
+#md.cubes()
 
 start = 0
 end = generation.nodes[-1].id
