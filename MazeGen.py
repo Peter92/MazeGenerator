@@ -17,20 +17,6 @@ class Node:
         self.parent = parent
         self.distance = node_list[parent].distance + 1
 
-class GenerationCore:
-    def __init__(self, dimensions, nodes=[]):
-        self.nodes = nodes
-        self.dimensions = dimensions
-        self.range = range(dimensions)
-        self.directions = self._possible_directions()
-    
-    def _possible_directions(self):
-        directions = []
-        for i in self.range:
-            for j in (-1, 1):
-                directions.append([j if i == n else 0 for n in self.range])
-        return directions
-
 def format_location(coordinate, dx=0.0, dy=0.0, dz=0.0):
     """Turn coordinates into 3D."""
     num_coordinates = len(coordinate)
@@ -268,76 +254,143 @@ class TreeData:
             branch = branch[branch_id]
         return branch, nodes
         
+class GenerationCore:
+    def __init__(self, dimensions):
+        self.nodes = []
+        self.dimensions = dimensions
+        self.range = range(dimensions)
+        self.directions = self._possible_directions()
+    
+    def _possible_directions(self):
+        """Build a list of every direction the maze can move in."""
+        directions = []
+        for i in self.range:
+            for j in (-1, 1):
+                directions.append([j if i == n else 0 for n in self.range])
+        return directions
         
+    
+    def generate(self, max_nodes=None, max_length=None, size=0.5, multiplier=0.99, location=None, bounds=None, min_nodes=None, max_fails=500, min_size=None, max_retries=None):
         
+        self.nodes = []
+        
+        #Sort out number of nodes
+        if max_nodes is None:
+            if min_nodes is None:
+                raise ValueError('either maximum or minimum nodes should be specified')
+            max_nodes = min_nodes
+        if min_nodes is None:
+            min_nodes = 0
+        #Take off 1 since total_nodes starts at -1
+        max_nodes -= 1
+        min_nodes -= 1
+        
+        #Find out how small the tree needs to go
+        if min_size is None:
+            min_size = size / 20
+        min_size = max(0.001, min_size)
+        min_size_exp = 0
+        while pow(2, min_size_exp) > min_size:
+            min_size_exp -= 1
+        
+        #Make the tree cover everything without wasting space
+        tree = TreeData(self, 0, min_size_exp)
+        
+        #Make up other values if not specified
+        if max_length is None:
+            max_length = max_nodes // 5
+        if max_retries is None:
+            max_retries = self.dimensions
+        
+        #Check the bounds are in the correct format
+        if bounds is not None:
+            if len(bounds) != 2:
+                raise ValueError('bounding box should contain 2 values')
+            for item in bounds:
+                if len(item) != self.dimensions:
+                    raise ValueError('incorrect bounding box size')
+        
+        #Check the location is in the correct format
+        if location is None:
+            location = [0.0 for i in generation.range]
+        elif len(location) != self.dimensions:
+            raise ValueError('invalid coordinates for starting location')
+        
+        #General range checks
+        multiplier = max(0.001, multiplier)
+        min_nodes = max(-1, min_nodes)
+        max_nodes = max(min_nodes, max_nodes)
+        max_length = max(1, max_length)
+        size = max(0.001, size)
+        
+        #Start generation
+        failed_nodes = current_retries = 0
+        current_length = total_nodes = -1
+        while total_nodes + failed_nodes < max_nodes or total_nodes < min_nodes and failed_nodes < max_fails:
+                
+            #End the branch if too many fails
+            if current_retries >= max_retries:
+                current_length = max_length
+                current_retries = 0
+                failed_nodes += 1
+                
+            #End the branch if too long
+            if current_length >= max_length:
+                node_id = random.randint(0, total_nodes)
+                current_length = 0
+            else:
+                node_id = total_nodes
+            
+            try:
+                node_start = self.nodes[node_id]
+                
+            except IndexError:
+                #Fix for the initial node
+                new_size = size
+                new_location = location
+                new_id = 0
+                
+            else:
+                #Get the initial values to create the new node from
+                new_size = node_start.size * multiplier
+                new_id = self.nodes[-1].id + 1
+                
+                #End branch now if size is too small
+                if new_size < min_size:
+                    current_retries = max_retries
+                    failed_nodes += 1
+                    continue
+                    
+                direction = random.choice(self.directions)
+                new_location = tuple(a + b * node_start.size * 2 for a, b in zip(node_start.location, direction))
+                 
+            #Check tree for collisions
+            node_path = tree.calculate(new_location, new_size)
+            near_nodes = tree.near(node_path)
+            if collision_check(self, near_nodes, new_location, new_size, bounds):
+                current_retries += 1
+                continue
+            
+            #Add to original node as child
+            try:
+                node_start.children.append(new_id)
+            except UnboundLocalError:
+                pass
+            
+            #Create a new node
+            new_node = Node(new_id, new_location, new_size)
+            new_node.update_parent(node_id, self.nodes)
+            
+            #Update values with new node
+            total_nodes += 1
+            current_length += 1
+            self.nodes.append(new_node)
+            tree.add(new_node, node_path)
+            
+            
 generation = GenerationCore(3)
-tree = TreeData(generation, 0, -3)
+generation.generate(min_nodes=1000, max_length=100, multiplier=0.9)
 
-max_nodes = 1000
-min_nodes = 0
-max_fails = 500
-max_length = 1000
-
-start_size = 10
-size_reduction = 0.98
-min_size = start_size / 20
-
-bounds = ((-1, -1, -1), (4, 4, 4))
-bounds = None
-
-
-
-max_retries = generation.dimensions * 2
-start_location = [0.0 for i in generation.range]
-
-
-total_nodes = failed_nodes = current_length = current_retries = 0
-
-generation.nodes.append(Node(0, start_location, start_size))
-tree.recalculate()
-while (total_nodes + failed_nodes < max_nodes 
-       or total_nodes < min_nodes and failed_nodes < max_fails):
-    
-    if current_retries >= max_retries:
-        current_length = max_length
-        current_retries = 0
-        failed_nodes += 1
-    if current_length >= max_length:
-        node_id = random.randint(0, total_nodes)
-        current_length = 0
-    else:
-        node_id = total_nodes
-    
-    node_start = generation.nodes[node_id]
-    
-    new_direction = random.choice(generation.directions)
-    
-    new_size = node_start.size * size_reduction
-    if new_size < min_size:
-        current_retries = max_retries
-        failed_nodes += 1
-        continue
-    new_location = tuple(a + b * node_start.size * 2 for a, b in zip(node_start.location, new_direction))
-    
-    node_path = tree.calculate(new_location, new_size)
-    near_nodes = tree.near(node_path)
-    if collision_check(generation, near_nodes, new_location, new_size, bounds):
-        current_retries += 1
-        continue
-    
-    total_nodes += 1
-    current_length += 1
-    new_id = generation.nodes[-1].id + 1
-    new_node = Node(new_id, new_location, new_size)
-    new_node.update_parent(node_id, generation.nodes)
-    node_start.children.append(new_id)
-    generation.nodes.append(new_node)
-    tree.add(new_node, node_path)
-
-md = MayaDraw(generation)
-
-
-#md.cubes()
 
 start = 0
 end = generation.nodes[-1].id
