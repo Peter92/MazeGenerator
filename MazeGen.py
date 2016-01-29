@@ -1,21 +1,26 @@
 from __future__ import division
 import random
-import pymel.core as py
 
 class Node:
-    def __init__(self, id, location, size, distance=0, parent=None, children=None):
+    def __init__(self, id, location, size, distance=0, parent=None, children=None, tree=None):
         self.id = id
         self.location = tuple(location)
         self.size = size
         self.parent = parent
         self.distance = distance
         self.children = children if children else []
-        self.tree = None
+        self.tree = tree
     def __repr__(self):
-        return 'Node(id={x.id}, distance={x.distance}, location={x.location}, size={x.size}, parent={x.parent}, children={x.children}'.format(x=self)
+        return 'Node(id={x.id}, tree={x.tree}, distance={x.distance}, location={x.location}, size={x.size}, parent={x.parent}, children={x.children}'.format(x=self)
     def update_parent(self, parent, node_list):
+        if parent < 0:
+            parent = None
         self.parent = parent
-        self.distance = node_list[parent].distance + 1
+        try:
+            self.distance = node_list[parent].distance + 1
+        except TypeError:
+            self.distance = 0
+
 
 def format_location(coordinate, dx=0.0, dy=0.0, dz=0.0):
     """Turn coordinates into 3D."""
@@ -67,54 +72,109 @@ def recursive_pathfind(start, end, node_list, path=[], reverse=True, last_id=Non
                 return found_path
     return None
 
-def draw_path(node_list):
-    curve_points = [format_location(node.location) for node in node_list]
-    pm.curve(p=curve_points, d=5)
-
 
 class MayaDraw:
-    def __init__(self, gc_instance):
-        self._gc = gc_instance
-        self._cubes = {}
+    
+    import pymel.core as pm
+    
+    def __init__(self, generation):
+        self._gen = generation
+        self._cubes = []
+        self._curves = []
+        self._paths = []
     
     def cubes(self):
-        for node in self._gc.nodes:
+        """Draw cubes based on information from the nodes.
+        As neighbour checking is spherical, there may be some overlapping.
+        It is here you may define what different dimensions do.
+        Currently it uses the 4th dimension for setting keys.
+        """
+        
+        self.remove(cubes=True, curves=False, paths=False)
+        
+        for node in self._gen.nodes:
             size = node.size * 1.98
-            new_cube = pm.polyCube(w=size, h=size, d=size)[0]
-            pm.move(new_cube, format_location(node.location))
-            id = node.id
-            if id in self._cubes:
-                pm.delete(id)
-            self._cubes[node.id] = new_cube
-            pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
-            pm.setAttr('{}.gen_id'.format(new_cube), id)
-            if self._gc.dimensions > 3:
+            
+            #Create new cube
+            new_cube = self.pm.polyCube(n='genCube{}'.format(node.id), w=size, h=size, d=size)[0]
+            self.pm.move(new_cube, format_location(node.location))
+            self._cubes.append(new_cube)
+            
+            #Set attributes
+            self.pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
+            self.pm.setAttr('{}.gen_id'.format(new_cube), node.id)
+            self.pm.addAttr(new_cube, sn='gen_dist', ln='GenerationDistance', min=0, at='long')
+            self.pm.setAttr('{}.gen_dist'.format(new_cube), node.distance)
+            self.pm.addAttr(new_cube, sn='gen_parent', ln='GenerationParent', dt='string')
+            self.pm.setAttr('{}.gen_parent'.format(new_cube), str(node.parent))
+            self.pm.addAttr(new_cube, sn='gen_child', ln='GenerationChildren', dt='string')
+            self.pm.setAttr('{}.gen_child'.format(new_cube), ', '.join(map(str, node.children)))
+            
+            #Set 4th dimension as keys
+            if self._gen.dimensions > 3:
                 visible_key = node.location[3]
                 time_gap = max(1.5, node.size)
-                pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key - time_gap)
-                pm.setKeyframe(new_cube, attribute='visibility', value=1, time=visible_key)
-                pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key + time_gap)
+                self.pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key - time_gap)
+                self.pm.setKeyframe(new_cube, attribute='visibility', value=1, time=visible_key)
+                self.pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key + time_gap)
 
     
     def curves(self):
+        """Draw curves by following the path of children.
+        Start a new curve when the next ID is no longer a child.
+        """
+        self.remove(curves=True, cubes=False, paths=False)
+        
+        #Run through all the points
         curve_list = []
-        for i, node in enumerate(self._gc.nodes):
+        for i, node in enumerate(self._gen.nodes):
             
-            if node.id not in self._gc.nodes[i-1].children:
+            #Start a new curve
+            if node.id not in self._gen.nodes[i-1].children:
                 try:
-                    start_point = [self._gc.nodes[self._gc.nodes[i].parent].location]
+                    start_point = [self._gen.nodes[self._gen.nodes[i].parent].location]
                 except TypeError:
                     start_point = []
                 curve_list.append(start_point)
                 
             curve_list[-1].append(node.location)
-            
+        
+        #Convert to suitable coordinates and draw
         for curves in curve_list:
             if len(curves) > 1:
                 converted_coordinates = [format_location(coordinate) for coordinate in curves]
-                pm.curve(p=converted_coordinates, d=1)
+                new_curve = self.pm.curve(p=converted_coordinates, d=1) 
+                self._curves.append(new_curve)
 
+    def path(self, start, end):
+        """Draw path between two nodes."""
+        nodes = self._gen.nodes
+        path = recursive_pathfind(start, end, nodes)
+        print path
+        if path is None:
+            return
+        curve_points = [format_location(nodes[node_id].location) for node_id in path]
+        self._paths.append(self.pm.curve(p=curve_points, d=5))
 
+    def remove(self, cubes=True, curves=True, paths=True):
+        """Remove any objects created by this class."""
+        
+        scene_objects = set(self.pm.ls())
+        if cubes:
+            for cube in self._cubes:
+                if cube in scene_objects:
+                    self.pm.delete(cube)
+            self._cubes = []
+        if curves:
+            for curve in self._curves:
+                if curve in scene_objects:
+                    self.pm.delete(curve)
+            self._curves = []
+        if paths:
+            for path in self._paths:
+                if path in scene_objects:
+                    self.pm.delete(path)
+            self._paths = []
 
 class CoordinateToSegment:
     def __init__(self, dimensions, tree_data):
@@ -173,7 +233,7 @@ class CoordinateToSegment:
         path = []
         coordinate_min, coordinate_max = sorted((coordinate - point_size,
                                                  coordinate + point_size))
-        for i in range(self.td.size - self.td.min):
+        for i in range(self.td.size - self.td.min - 1):
             current_range = 2 ** (self.td.size - i - 1)
             if coordinate == total or coordinate_min < total < coordinate_max:
                 return path
@@ -253,7 +313,8 @@ class TreeData:
                 branch[branch_id] = [[] for i in self._branch_length]
             branch = branch[branch_id]
         return branch, nodes
-        
+       
+
 class GenerationCore:
     def __init__(self, dimensions):
         self.nodes = []
@@ -387,12 +448,15 @@ class GenerationCore:
             self.nodes.append(new_node)
             tree.add(new_node, node_path)
             
-            
+    
+try:
+    draw.remove()
+except NameError:
+    pass
 generation = GenerationCore(3)
-generation.generate(min_nodes=1000, max_length=100, multiplier=0.9)
+generation.generate(max_nodes=100, max_length=100, multiplier=0.98)
+draw = MayaDraw(generation)
 
-
-start = 0
-end = generation.nodes[-1].id
-node_list = [generation.nodes[node_id] for node_id in recursive_pathfind(start, end, generation.nodes)]
-draw_path(node_list)
+draw.curves()
+draw.cubes()
+draw.path(0, generation.nodes[-1].id + 1)
