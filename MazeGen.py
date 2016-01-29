@@ -231,7 +231,8 @@ class TreeData:
         while max_range < highest_coord or -max_range > lowest_coord:
             self.size += 1
             max_range = 2 ** self.size
-        return self.size - start_size
+        if self.size - start_size:
+            self.recalculate()
     
     def recalculate(self):
         """Recalculate the path to every point."""
@@ -243,29 +244,29 @@ class TreeData:
     def add(self, node, path):
         """Add a node to the tree."""
         node.tree = path
-        branch = self._recursive_branch(path)
-        branch[-1].append(node.id)
+        self._recursive_branch(path)[0][-1].append(node.id)
 
     def calculate(self, location, size):
         """Calculate the path to a point with location and size."""
-        if self.adjust_size(location):
-            self.recalculate()
+        self.adjust_size(location)
         path = self._conversion.convert(location, size)
         return path
         
     def near(self, path):
         """Find all nodes below a recursive path, used in conjunction with calculate."""
-        branch = self._recursive_branch(path)
+        branch, nodes = self._recursive_branch(path)
         nearby_nodes = get_recursive_items(branch)
-        return nearby_nodes
+        return nearby_nodes + nodes
     
     def _recursive_branch(self, path):
         branch = self.data
+        nodes = []
         for branch_id in path:
+            nodes += branch[-1]
             if not branch[branch_id]:
                 branch[branch_id] = [[] for i in self._branch_length]
             branch = branch[branch_id]
-        return branch
+        return branch, nodes
         
         
         
