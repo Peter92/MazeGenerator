@@ -1,7 +1,9 @@
 from __future__ import division
 import random
 
-class Node:
+class Node(object):
+    """Store the data for each node."""
+    
     def __init__(self, id, location, size, distance=0, parent=None, children=None, tree=None):
         self.id = id
         self.location = tuple(location)
@@ -10,9 +12,18 @@ class Node:
         self.distance = distance
         self.children = children if children else []
         self.tree = tree
+        
     def __repr__(self):
-        return 'Node(id={x.id}, tree={x.tree}, distance={x.distance}, location={x.location}, size={x.size}, parent={x.parent}, children={x.children}'.format(x=self)
+        return ('Node(id={x.id}, ' 
+                     'tree={x.tree}, '
+                     'distance={x.distance}, '
+                     'location={x.location}, '
+                     'size={x.size}, '
+                     'parent={x.parent}, '
+                     'children={x.children}').format(x=self)
+                     
     def update_parent(self, parent, node_list):
+        """Set a new parent and calculate the distance from origin."""
         if parent < 0:
             parent = None
         self.parent = parent
@@ -22,58 +33,50 @@ class Node:
             self.distance = 0
 
 
-def format_location(coordinate, dx=0.0, dy=0.0, dz=0.0):
-    """Turn coordinates into 3D."""
-    num_coordinates = len(coordinate)
-    if num_coordinates == 1:
-        return (coordinate[0], dy, dz)
-    elif num_coordinates == 2:
-        return (coordinate[0], coordinate[1], dz)
-    else:
-        return tuple(coordinate[:3])
-        
-def collision_check(gc_instance, node_ids, location, size, bounds=None):
-    if bounds:
-        for i in gc_instance.range:
-            if not bounds[0][i] + size <= location[i] <= bounds[1][i] - size:
-                return True
-    
-    for node_id in node_ids:
-        node = gc_instance.nodes[node_id]
-        size_total = size + node.size
-        distance = [abs(a - b) for a, b in zip(location, node.location)]
-        if max(distance) > size_total:
-            continue
-        distance_total = sum(pow(i, 2) for i in distance)
-        if distance_total < pow(size_total, 2):
-            return True
-    return False
-
-def recursive_pathfind(start, end, node_list, path=[], reverse=True, last_id=None):
-    path = path + [start]
+def recursive_pathfind(start, end, node_list, _path=[], _reverse=True, _last_id=None):
+    """Recursively find a path between two nodes."""
+    _path = _path + [start]
     
     #Path complete
     if start == end:
-        return path
+        return _path
         
     #Search parents
-    if reverse:
+    if _reverse:
         parent = node_list[start].parent
         if parent is not None:
-            found_path = recursive_pathfind(parent, end, node_list, path=path, reverse=True, last_id=start)
+            found_path = recursive_pathfind(parent, end, node_list,
+                                            _path=_path, _reverse=True, _last_id=start)
             if found_path is not None:
                 return found_path
                 
     #Search children
     for node_id in node_list[start].children:
-        if node_id != last_id:
-            found_path = recursive_pathfind(node_id, end, node_list, path=path, reverse=False, last_id=start)
+        if node_id != _last_id:
+            found_path = recursive_pathfind(node_id, end, node_list, 
+                                            _path=_path, _reverse=False, _last_id=start)
             if found_path is not None:
                 return found_path
     return None
 
 
-class MayaDraw:
+
+def format_location(coordinate, x=0.0, y=0.0, z=0.0):
+    """Turn any coordinates into 3D to be compatible with Maya."""
+    num_coordinates = len(coordinate)
+    if num_coordinates == 0:
+        return(x, y, z)
+    elif num_coordinates == 1:
+        return (coordinate[0], y, z)
+    elif num_coordinates == 2:
+        return (coordinate[0], coordinate[1], z)
+    else:
+        return tuple(coordinate[:3])
+        
+class MayaDraw(object):
+    """Class to be used for Maya only.
+    It handles building cubes and curves to visualise the maze.
+    """
     
     import pymel.core as pm
     
@@ -85,9 +88,10 @@ class MayaDraw:
     
     def cubes(self):
         """Draw cubes based on information from the nodes.
-        As neighbour checking is spherical, there may be some overlapping.
-        It is here you may define what different dimensions do.
-        Currently it uses the 4th dimension for setting keys.
+        As neighbour checking is spherical, there may be some 
+        overlapping where corners meet.
+        It is here you interpret the dimensions, where currently it has
+        support for up to 4 (4th is used for keyframes).
         """
         
         self.remove(cubes=True, curves=False, paths=False)
@@ -112,11 +116,10 @@ class MayaDraw:
             
             #Set 4th dimension as keys
             if self._gen.dimensions > 3:
-                visible_key = node.location[3]
                 time_gap = max(1.5, node.size)
-                self.pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key - time_gap)
-                self.pm.setKeyframe(new_cube, attribute='visibility', value=1, time=visible_key)
-                self.pm.setKeyframe(new_cube, attribute='visibility', value=0, time=visible_key + time_gap)
+                self.pm.setKeyframe(new_cube, at='v', value=0, time=node.location[3] - time_gap)
+                self.pm.setKeyframe(new_cube, at='v', value=1, time=node.location[3])
+                self.pm.setKeyframe(new_cube, at='v', value=0, time=node.location[3] + time_gap)
 
     
     def curves(self):
@@ -150,7 +153,6 @@ class MayaDraw:
         """Draw path between two nodes."""
         nodes = self._gen.nodes
         path = recursive_pathfind(start, end, nodes)
-        print path
         if path is None:
             return
         curve_points = [format_location(nodes[node_id].location) for node_id in path]
@@ -158,7 +160,6 @@ class MayaDraw:
 
     def remove(self, cubes=True, curves=True, paths=True):
         """Remove any objects created by this class."""
-        
         scene_objects = set(self.pm.ls())
         if cubes:
             for cube in self._cubes:
@@ -176,12 +177,18 @@ class MayaDraw:
                     self.pm.delete(path)
             self._paths = []
 
-class CoordinateToSegment:
+class CoordinateToSegment(object):
+    """Class used for the tree calculations.
+    Its main purpose is to find which segment a node would be in, and
+    generate the path to it.
+    """
     def __init__(self, dimensions, tree_data):
         self.td = tree_data
         self.dimensions = dimensions
         self._range = range(dimensions)
         n = 0
+        
+        #Build index of paths
         self.paths = {}
         for path in self._paths():
             self.paths[tuple(path)] = n
@@ -189,65 +196,93 @@ class CoordinateToSegment:
 
     def convert(self, coordinates, point_size):
         """Convert a coordinate into segments."""
+        
         if len(coordinates) != self.dimensions:
             raise ValueError('invalid coordinate size')
+        
+        #Find path to each coordinate
         segments = []
         for i in self._range:
             segments.append(self._find_segment(coordinates[i], point_size))
+        
+        #Trim them all to the same length
         min_len = min(len(i) for i in segments)
         segments = [tuple(i[:min_len]) for i in segments]
+        
+        #Calculate the path IDs
         path = [self.paths[i] for i in zip(*segments)]
         return path
 
     def reverse(self, segment):
-        """Undo conversion for debugging."""
+        """Calculate the coordinates from a segment.
+        This only gives a rough value, and is only needed for debugging.
+        """
+        #Find path from the path index IDs
         segments = [k for i in segment for k, v in self.paths.iteritems() if v == i]
+        
+        #Split into separate coordinates
         joined_segments = []
         for i in range(self.dimensions):
             joined_segments.append([j[i] for j in segments])
+            
+        #Calculate where the coordinate is following the path
         totals = []
         for coordinate in joined_segments:
             n = self.td.size - 1
             total = 0
             for i in coordinate:
-                total += 2 ** n * i
+                total += i * pow(2, n)
                 n -= 1
             totals.append(total)
         print totals
             
-    def _paths(self, current_path=None, current_level=0):
-        """Generate a list of paths in the current dimension."""
+    def _paths(self, current_path=None, current_level=0, directions=(-1, 1)):
+        """Generate a list of paths in the current dimension.
+        This is used to get the path index.
+        """
         if current_path is None:
             current_path = []
-        n = (-1, 1)
         if current_level == self.dimensions:
             return [current_path]
+        
+        #Repeat recursively until editing current_path[-1]
         return_path = []
-        for i in n:
-             return_path += self._paths(current_path + [i], current_level + 1)
+        for i in directions:
+             return_path += self._paths(current_path + [i], current_level + 1, 
+                                        directions=directions)
+             
         return return_path
 
     def _find_segment(self, coordinate, point_size):
-        """Convert a number into the correct segment."""
+        """Convert a number into the correct segment.
+        If the maximum tree size changes, this needs to be recalculated.
+        This runs until either the minimum size has been hit, or the 
+        node is overlapping multiple segments.
+        """
         total = 0
         path = []
-        coordinate_min, coordinate_max = sorted((coordinate - point_size,
-                                                 coordinate + point_size))
+        coordinate_sort = sorted((coordinate - point_size, coordinate + point_size))
+        
         for i in range(self.td.size - self.td.min - 1):
-            current_range = 2 ** (self.td.size - i - 1)
-            if coordinate == total or coordinate_min < total < coordinate_max:
+            current_amount = pow(2, self.td.size - i - 1)
+            
+            #Detect whether to end or which way to continue
+            if coordinate == total or coordinate_sort[0] < total < coordinate_sort[1]:
                 return path
-            elif coordinate_max < total:
-                total -= current_range
+            elif coordinate_sort[1] < total:
+                total -= current_amount
                 path.append(-1)
-            elif coordinate_min > total:
-                total += current_range
+            elif coordinate_sort[0] > total:
+                total += current_amount
                 path.append(1)
             else:
-                raise ValueError('problem with coordinate conversion')
+                raise ValueError('unknown segment error')
+                
         return path
 
+
 def get_recursive_items(tree, items=None):
+    """Iterate through a list to get all recursive items."""
     if items is None:
         items = []
     try:
@@ -257,11 +292,15 @@ def get_recursive_items(tree, items=None):
         items += tree
     return items
 
-class TreeData:
 
-    def __init__(self, gc_instance, start_size, min_size=None):
-        self._gc = gc_instance
-        self._conversion = CoordinateToSegment(self._gc.dimensions, self)
+class TreeData(object):
+    """Class to store the tree of points.
+    It can work in any dimension, and dynamically grows when needed.
+    """
+
+    def __init__(self, generation, start_size, min_size=None):
+        self._gen = generation
+        self._conversion = CoordinateToSegment(self._gen.dimensions, self)
         if min_size is None:
             min_size = start_size
         self.size = start_size
@@ -270,21 +309,26 @@ class TreeData:
         self.data = [[] for i in self._branch_length]
     
     def adjust_size(self, coordinate):
+        """Increase the size of the tree if needed.
+        If the size does change, everything is recalculated.
+        """
         start_size = self.size
         highest_coord = max(coordinate)
         lowest_coord = min(coordinate)
-        max_range = 2 ** self.size
+        
+        #Increment by 1 until the size fits
+        max_range = pow(2, self.size)
         while max_range < highest_coord or -max_range > lowest_coord:
             self.size += 1
-            max_range = 2 ** self.size
+            max_range = pow(2, self.size)
         if self.size - start_size:
             self.recalculate()
     
     def recalculate(self):
         """Recalculate the path to every point."""
         self.data = [[] for i in self._branch_length]
-        for node in self._gc.nodes:
-            path = self.calculate(node.location, node.size)
+        for node in self._gen.nodes:
+            path = self.calculate(node.location, node.size, check_size=False)
             self.add(node, path)
     
     def add(self, node, path):
@@ -292,30 +336,45 @@ class TreeData:
         node.tree = path
         self._recursive_branch(path)[0][-1].append(node.id)
 
-    def calculate(self, location, size):
+    def calculate(self, location, size, check_size=True):
         """Calculate the path to a point with location and size."""
-        self.adjust_size(location)
+        if check_size:
+            self.adjust_size(location)
         path = self._conversion.convert(location, size)
         return path
-        
+
     def near(self, path):
-        """Find all nodes below a recursive path, used in conjunction with calculate."""
+        """Find all nodes near a path for collision checking.
+        Use TreeData.calculate to get the path.
+        """
         branch, nodes = self._recursive_branch(path)
         nearby_nodes = get_recursive_items(branch)
         return nearby_nodes + nodes
     
     def _recursive_branch(self, path):
+        """Follows a recursive path to get part of a list.
+        If the path goes deeper than the list, new branches of the list
+        will be created.
+        For collision check purposes, a list of all items found going 
+        to that branch is also returned.
+        """
         branch = self.data
         nodes = []
+        
         for branch_id in path:
             nodes += branch[-1]
+            
+            #Create new branch if it doesn't exist
             if not branch[branch_id]:
                 branch[branch_id] = [[] for i in self._branch_length]
+                
             branch = branch[branch_id]
         return branch, nodes
        
 
-class GenerationCore:
+class GenerationCore(object):
+    """Create and store the main generation."""
+    
     def __init__(self, dimensions):
         self.nodes = []
         self.dimensions = dimensions
@@ -329,12 +388,11 @@ class GenerationCore:
             for j in (-1, 1):
                 directions.append([j if i == n else 0 for n in self.range])
         return directions
-        
     
     def generate(self, max_nodes=None, max_length=None, size=0.5, multiplier=0.99, location=None, bounds=None, min_nodes=None, max_fails=500, min_size=None, max_retries=None):
+        """Main function to generate the maze."""
         
         self.nodes = []
-        
         #Sort out number of nodes
         if max_nodes is None:
             if min_nodes is None:
@@ -387,7 +445,8 @@ class GenerationCore:
         #Start generation
         failed_nodes = current_retries = 0
         current_length = total_nodes = -1
-        while total_nodes + failed_nodes < max_nodes or total_nodes < min_nodes and failed_nodes < max_fails:
+        while (total_nodes + failed_nodes < max_nodes
+               or total_nodes < min_nodes and failed_nodes < max_fails):
                 
             #End the branch if too many fails
             if current_retries >= max_retries:
@@ -423,12 +482,13 @@ class GenerationCore:
                     continue
                     
                 direction = random.choice(self.directions)
-                new_location = tuple(a + b * node_start.size * 2 for a, b in zip(node_start.location, direction))
+                new_location = tuple(a + b * node_start.size * 2 for a, b 
+                                     in zip(node_start.location, direction))
                  
             #Check tree for collisions
             node_path = tree.calculate(new_location, new_size)
             near_nodes = tree.near(node_path)
-            if collision_check(self, near_nodes, new_location, new_size, bounds):
+            if self.collision_check(new_location, new_size, bounds, near_nodes):
                 current_retries += 1
                 continue
             
@@ -448,15 +508,60 @@ class GenerationCore:
             self.nodes.append(new_node)
             tree.add(new_node, node_path)
             
-    
+    def collision_check(self, location, size, bounds=None, node_ids=None):
+        """Check a new node isn't too close to an existing one.
+        
+        The first calculation is a simple range check, if a bounding box
+        has been defined.
+        
+        The second calculation iterates through all the nodes, and first
+        checks that the maximum distance on a single plane isn't over 
+        the combined node size. If it is within range, pythagoras is
+        used to find and compare the squared distance.
+        """
+        
+        #Get every node ID if not provided
+        if node_ids is None:
+            node_ids = range(len(self.nodes))
+        
+        #Bounding box search
+        if bounds:
+            for i in self.range:
+                if not bounds[0][i] + size <= location[i] <= bounds[1][i] - size:
+                    return True
+        
+        #Pythagoras search
+        for node_id in node_ids:
+            node = self.nodes[node_id]
+            size_total = size + node.size
+            distance = [abs(a - b) for a, b in zip(location, node.location)]
+            
+            #Skip before the calculation if the maximum distance is too far
+            if max(distance) > size_total:
+                continue
+                
+            distance_total = sum(pow(i, 2) for i in distance)
+            if distance_total < pow(size_total, 2):
+                return True
+                
+        return False
+
+#Delete previous generation
 try:
     draw.remove()
 except NameError:
     pass
-generation = GenerationCore(3)
-generation.generate(max_nodes=100, max_length=100, multiplier=0.98)
-draw = MayaDraw(generation)
 
-draw.curves()
-draw.cubes()
-draw.path(0, generation.nodes[-1].id + 1)
+#Create new generation
+generation = GenerationCore(3)
+generation.generate(max_nodes=1000, max_length=100, multiplier=0.98)
+
+#Draw generation in 3D if in Maya
+try:
+    draw = MayaDraw(generation)
+except ImportError:
+    pass
+else:
+    draw.curves()
+    draw.cubes()
+    draw.path(0, generation.nodes[-1].id)
