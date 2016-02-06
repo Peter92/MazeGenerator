@@ -1,5 +1,6 @@
 from __future__ import division
 import random
+import cPickle
 
 class Node(object):
     """Store the data for each node."""
@@ -163,16 +164,22 @@ class MayaDraw(object):
         scene_objects = set(self.pm.ls())
         if cubes:
             for cube in self._cubes:
+                if cube == u'None':
+                    print self._cubes
                 if cube in scene_objects:
                     self.pm.delete(cube)
             self._cubes = []
         if curves:
             for curve in self._curves:
+                if curve == u'None':
+                    print self._curves
                 if curve in scene_objects:
                     self.pm.delete(curve)
             self._curves = []
         if paths:
             for path in self._paths:
+                if path == u'None':
+                    print self._paths
                 if path in scene_objects:
                     self.pm.delete(path)
             self._paths = []
@@ -375,11 +382,38 @@ class TreeData(object):
 class GenerationCore(object):
     """Create and store the main generation."""
     
-    def __init__(self, dimensions):
+    def __init__(self, dimensions, size=1, min_size=None, multiplier=0.99, bounds=None, max_retries=None):
         self.nodes = []
         self.dimensions = dimensions
         self.range = range(dimensions)
         self.directions = self._possible_directions()
+        
+        self.multiplier = max(0.001, multiplier)
+        self.size = max(0.001, size)
+        self.bounds = bounds
+        self.retries = max_retries
+        
+        if self.retries is None:
+            self.retries = self.dimensions
+        
+        #Check the bounds are in the correct format
+        if self.bounds is not None:
+            if len(self.bounds) != 2:
+                raise ValueError('bounding box should contain 2 values')
+            for item in self.bounds:
+                if len(item) != self.dimensions:
+                    raise ValueError('incorrect bounding box size')
+        
+        #Find out how small the tree needs to go
+        if min_size is None:
+            min_size = self.size / 20
+        self.min_size = max(0.001, min_size)
+        min_size_exp = 0
+        while pow(2, min_size_exp) > self.min_size:
+            min_size_exp -= 1
+            
+        #Make the tree cover everything without wasting space
+        self.tree = TreeData(self, 0, min_size_exp)
     
     def _possible_directions(self):
         """Build a list of every direction the maze can move in."""
@@ -389,7 +423,7 @@ class GenerationCore(object):
                 directions.append([j if i == n else 0 for n in self.range])
         return directions
     
-    def generate(self, max_nodes=None, max_length=None, size=0.5, multiplier=0.99, location=None, bounds=None, min_nodes=None, max_fails=500, min_size=None, max_retries=None):
+    def generate(self, max_nodes=None, max_length=None, location=None, min_nodes=None, max_fails=500):
         """Main function to generate the maze."""
         
         self.nodes = []
@@ -404,30 +438,10 @@ class GenerationCore(object):
         max_nodes -= 1
         min_nodes -= 1
         
-        #Find out how small the tree needs to go
-        if min_size is None:
-            min_size = size / 20
-        min_size = max(0.001, min_size)
-        min_size_exp = 0
-        while pow(2, min_size_exp) > min_size:
-            min_size_exp -= 1
-        
-        #Make the tree cover everything without wasting space
-        tree = TreeData(self, 0, min_size_exp)
         
         #Make up other values if not specified
         if max_length is None:
             max_length = max_nodes // 5
-        if max_retries is None:
-            max_retries = self.dimensions
-        
-        #Check the bounds are in the correct format
-        if bounds is not None:
-            if len(bounds) != 2:
-                raise ValueError('bounding box should contain 2 values')
-            for item in bounds:
-                if len(item) != self.dimensions:
-                    raise ValueError('incorrect bounding box size')
         
         #Check the location is in the correct format
         if location is None:
@@ -436,11 +450,9 @@ class GenerationCore(object):
             raise ValueError('invalid coordinates for starting location')
         
         #General range checks
-        multiplier = max(0.001, multiplier)
         min_nodes = max(-1, min_nodes)
         max_nodes = max(min_nodes, max_nodes)
         max_length = max(1, max_length)
-        size = max(0.001, size)
         
         #Start generation
         failed_nodes = current_retries = 0
@@ -449,7 +461,7 @@ class GenerationCore(object):
                or total_nodes < min_nodes and failed_nodes < max_fails):
                 
             #End the branch if too many fails
-            if current_retries >= max_retries:
+            if current_retries >= self.retries:
                 current_length = max_length
                 current_retries = 0
                 failed_nodes += 1
@@ -466,18 +478,18 @@ class GenerationCore(object):
                 
             except IndexError:
                 #Fix for the initial node
-                new_size = size
+                new_size = self.size
                 new_location = location
                 new_id = 0
                 
             else:
                 #Get the initial values to create the new node from
-                new_size = node_start.size * multiplier
+                new_size = node_start.size * self.multiplier
                 new_id = self.nodes[-1].id + 1
                 
                 #End branch now if size is too small
-                if new_size < min_size:
-                    current_retries = max_retries
+                if new_size < self.min_size:
+                    current_retries = self.retries
                     failed_nodes += 1
                     continue
                     
@@ -486,9 +498,9 @@ class GenerationCore(object):
                                      in zip(node_start.location, direction))
                  
             #Check tree for collisions
-            node_path = tree.calculate(new_location, new_size)
-            near_nodes = tree.near(node_path)
-            if self.collision_check(new_location, new_size, bounds, near_nodes):
+            node_path = self.tree.calculate(new_location, new_size)
+            near_nodes = self.tree.near(node_path)
+            if self.collision_check(new_location, new_size, self.bounds, near_nodes):
                 current_retries += 1
                 continue
             
@@ -506,8 +518,60 @@ class GenerationCore(object):
             total_nodes += 1
             current_length += 1
             self.nodes.append(new_node)
-            tree.add(new_node, node_path)
+            self.tree.add(new_node, node_path)
+    
+    def add_branch(self, length=1, node_id=None):
+        if node_id is None:
+            node_id = random.choice(self.nodes).id
+        
+        i = 0
+        retries = 0
+        while i < length:
+            new_id = self._add_node(node_id)
+            if new_id < 0 or retries > self.retries:
+                return
+            elif not new_id:
+                retries += 1
+                continue
+            else:
+                node_id = new_id
+                retries = 0
+                i += 1
+    
+    def _add_node(self, node_id):
+        
+        node_start = self.nodes[node_id]
             
+        #Get the initial values to create the new node from
+        new_size = node_start.size * self.multiplier
+        new_id = self.nodes[-1].id + 1
+        
+        #End branch now if size is too small
+        if new_size < self.min_size:
+            return -1
+            
+        direction = random.choice(self.directions)
+        new_location = tuple(a + b * node_start.size * 2 for a, b 
+                             in zip(node_start.location, direction))
+             
+        #Check tree for collisions
+        node_path = self.tree.calculate(new_location, new_size)
+        near_nodes = self.tree.near(node_path)
+        if self.collision_check(new_location, new_size, self.bounds, near_nodes):
+            return 0
+        
+        #Add to original node as child
+        node_start.children.append(new_id)
+        
+        #Create a new node
+        new_node = Node(new_id, new_location, new_size)
+        new_node.update_parent(node_id, self.nodes)
+        
+        #Update values with new node
+        self.nodes.append(new_node)
+        self.tree.add(new_node, node_path)
+        return new_id
+        
     def collision_check(self, location, size, bounds=None, node_ids=None):
         """Check a new node isn't too close to an existing one.
         
@@ -545,6 +609,12 @@ class GenerationCore(object):
                 return True
                 
         return False
+    
+    def save(self, location='C:/Users/Peter/MazeGeneration.cache'):
+        save_data = {'Dimensions': self.dimensions,
+                     'Nodes': self.nodes}
+        with open(location, 'w') as f:
+            f.write(cPickle.dumps(save_data))
 
 #Delete previous generation
 try:
@@ -553,8 +623,13 @@ except NameError:
     pass
 
 #Create new generation
-generation = GenerationCore(3)
-generation.generate(max_nodes=1000, max_length=100, multiplier=0.98)
+dimensions = 2
+generation = GenerationCore(dimensions, multiplier=0.98)
+generation.generate(max_nodes=100, max_length=100)
+
+
+
+generation.save()
 
 #Draw generation in 3D if in Maya
 try:
