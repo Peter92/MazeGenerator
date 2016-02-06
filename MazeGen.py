@@ -5,7 +5,8 @@ import cPickle
 class Node(object):
     """Store the data for each node."""
     
-    def __init__(self, id, location, size, distance=0, parent=None, children=None, tree=None):
+    def __init__(self, id, location, size, distance=0, 
+                 parent=None, children=None, tree=None, neighbours=None):
         self.id = id
         self.location = tuple(location)
         self.size = size
@@ -13,6 +14,7 @@ class Node(object):
         self.distance = distance
         self.children = children if children else []
         self.tree = tree
+        self.neighbours = neighbours
         
     def __repr__(self):
         return ('Node(id={x.id}, ' 
@@ -21,7 +23,11 @@ class Node(object):
                      'location={x.location}, '
                      'size={x.size}, '
                      'parent={x.parent}, '
-                     'children={x.children}').format(x=self)
+                     'children={x.children}, '
+                     'neighbours={x.neighbours}').format(x=self)
+    
+    def update_neighbours(self):
+        self.neighbours = len(self.children) + (self.parent is not None)
                      
     def update_parent(self, parent, node_list):
         """Set a new parent and calculate the distance from origin."""
@@ -114,6 +120,8 @@ class MayaDraw(object):
             self.pm.setAttr('{}.gen_parent'.format(new_cube), str(node.parent))
             self.pm.addAttr(new_cube, sn='gen_child', ln='GenerationChildren', dt='string')
             self.pm.setAttr('{}.gen_child'.format(new_cube), ', '.join(map(str, node.children)))
+            self.pm.addAttr(new_cube, sn='gen_adj', ln='GenerationNeighbours', min=0, at='long')
+            self.pm.setAttr('{}.gen_adj'.format(new_cube), node.neighbours)
             
             #Set 4th dimension as keys
             if self._gen.dimensions > 3:
@@ -162,27 +170,30 @@ class MayaDraw(object):
     def remove(self, cubes=True, curves=True, paths=True):
         """Remove any objects created by this class."""
         scene_objects = set(self.pm.ls())
+        delete_objects = []
         if cubes:
             for cube in self._cubes:
                 if cube == u'None':
                     print self._cubes
                 if cube in scene_objects:
-                    self.pm.delete(cube)
+                    delete_objects.append(cube)
             self._cubes = []
         if curves:
             for curve in self._curves:
                 if curve == u'None':
                     print self._curves
                 if curve in scene_objects:
-                    self.pm.delete(curve)
+                    delete_objects.append(curve)
             self._curves = []
         if paths:
             for path in self._paths:
                 if path == u'None':
                     print self._paths
                 if path in scene_objects:
-                    self.pm.delete(path)
+                    delete_objects.append(path)
             self._paths = []
+        for object in delete_objects:
+            self.pm.delete(object)
 
 class CoordinateToSegment(object):
     """Class used for the tree calculations.
@@ -382,8 +393,9 @@ class TreeData(object):
 class GenerationCore(object):
     """Create and store the main generation."""
     
-    def __init__(self, dimensions, size=1, min_size=None, multiplier=0.99, bounds=None, max_retries=None):
-        self.nodes = []
+    def __init__(self, dimensions, size=1, min_size=None, multiplier=0.99, 
+                 bounds=None, max_retries=None, _nodes=None, _tree_data=None):
+        self.nodes = [] if _nodes is None else _nodes
         self.dimensions = dimensions
         self.range = range(dimensions)
         self.directions = self._possible_directions()
@@ -414,6 +426,8 @@ class GenerationCore(object):
             
         #Make the tree cover everything without wasting space
         self.tree = TreeData(self, 0, min_size_exp)
+        if _tree_data is not None:
+            self.tree.data = _tree_data
     
     def _possible_directions(self):
         """Build a list of every direction the maze can move in."""
@@ -437,7 +451,6 @@ class GenerationCore(object):
         #Take off 1 since total_nodes starts at -1
         max_nodes -= 1
         min_nodes -= 1
-        
         
         #Make up other values if not specified
         if max_length is None:
@@ -473,98 +486,60 @@ class GenerationCore(object):
             else:
                 node_id = total_nodes
             
-            try:
-                node_start = self.nodes[node_id]
-                
-            except IndexError:
-                #Fix for the initial node
-                new_size = self.size
-                new_location = location
-                new_id = 0
-                
+            if node_id < 0:
+                node_status = self._add_node(location=location)
             else:
-                #Get the initial values to create the new node from
-                new_size = node_start.size * self.multiplier
-                new_id = self.nodes[-1].id + 1
+                node_status = self._add_node(node_id=node_id)
                 
-                #End branch now if size is too small
-                if new_size < self.min_size:
-                    current_retries = self.retries
-                    failed_nodes += 1
-                    continue
-                    
-                direction = random.choice(self.directions)
-                new_location = tuple(a + b * node_start.size * 2 for a, b 
-                                     in zip(node_start.location, direction))
-                 
-            #Check tree for collisions
-            node_path = self.tree.calculate(new_location, new_size)
-            near_nodes = self.tree.near(node_path)
-            if self.collision_check(new_location, new_size, self.bounds, near_nodes):
+            if node_status == -1:
+                current_retries = self.retries
+                failed_nodes += 1
+            elif node_status == -2:
                 current_retries += 1
-                continue
-            
-            #Add to original node as child
-            try:
-                node_start.children.append(new_id)
-            except UnboundLocalError:
-                pass
-            
-            #Create a new node
-            new_node = Node(new_id, new_location, new_size)
-            new_node.update_parent(node_id, self.nodes)
-            
-            #Update values with new node
-            total_nodes += 1
-            current_length += 1
-            self.nodes.append(new_node)
-            self.tree.add(new_node, node_path)
-    
-    def add_branch(self, length=1, node_id=None):
-        if node_id is None:
-            node_id = random.choice(self.nodes).id
-        
-        i = 0
-        retries = 0
-        while i < length:
-            new_id = self._add_node(node_id)
-            if new_id < 0 or retries > self.retries:
-                return
-            elif not new_id:
-                retries += 1
-                continue
             else:
-                node_id = new_id
-                retries = 0
-                i += 1
+                total_nodes += 1
+                current_length += 1
+                
     
-    def _add_node(self, node_id):
+    def _add_node(self, node_id=None, location=None):
         
-        node_start = self.nodes[node_id]
+        if node_id is None:
+            if location is None:
+                raise ValueError('location must be defined if no nodes exist')
+            new_size = self.size
+            new_location = location
+            new_id = 0
             
-        #Get the initial values to create the new node from
-        new_size = node_start.size * self.multiplier
-        new_id = self.nodes[-1].id + 1
-        
-        #End branch now if size is too small
-        if new_size < self.min_size:
-            return -1
+        else:
+            node_start = self.nodes[node_id]
+                
+            #Get the initial values to create the new node from
+            new_size = node_start.size * self.multiplier
+            new_id = self.nodes[-1].id + 1
             
-        direction = random.choice(self.directions)
-        new_location = tuple(a + b * node_start.size * 2 for a, b 
-                             in zip(node_start.location, direction))
+            #End branch now if size is too small
+            if new_size < self.min_size:
+                return -1
+                
+            direction = random.choice(self.directions)
+            new_location = tuple(a + b * node_start.size * 2 for a, b 
+                                 in zip(node_start.location, direction))
              
         #Check tree for collisions
         node_path = self.tree.calculate(new_location, new_size)
         near_nodes = self.tree.near(node_path)
         if self.collision_check(new_location, new_size, self.bounds, near_nodes):
-            return 0
+            return -2
         
         #Add to original node as child
-        node_start.children.append(new_id)
+        try:
+            node_start.children.append(new_id)
+            node_start.neighbours += 1
+        except UnboundLocalError:
+            pass
         
         #Create a new node
-        new_node = Node(new_id, new_location, new_size)
+        new_node = Node(new_id, new_location, new_size, neighbours=node_id is not None)
         new_node.update_parent(node_id, self.nodes)
         
         #Update values with new node
@@ -572,6 +547,32 @@ class GenerationCore(object):
         self.tree.add(new_node, node_path)
         return new_id
         
+        
+    def add_branch(self, length=1, node_id=None):
+        total_directions = len(self.directions)
+        
+        #Find a node without any neighbours
+        while node_id is None:
+            node_id = random.choice(self.nodes).id
+            if self.nodes[node_id].neighbours == total_directions:
+                node_id = None
+        
+        #Draw a path until a limit is reached
+        i = 0
+        retries = 0
+        while i < length:
+            node_status = self._add_node(node_id)
+            if node_status == -1 or retries > self.retries:
+                return
+            elif node_status == -2:
+                retries += 1
+                continue
+            else:
+                node_id = node_status
+                retries = 0
+                i += 1
+    
+    
     def collision_check(self, location, size, bounds=None, node_ids=None):
         """Check a new node isn't too close to an existing one.
         
@@ -610,11 +611,30 @@ class GenerationCore(object):
                 
         return False
     
-    def save(self, location='C:/Users/Peter/MazeGeneration.cache'):
-        save_data = {'Dimensions': self.dimensions,
-                     'Nodes': self.nodes}
+    def save(self, location):
+        save_data = {'Bounds': self.bounds,
+                     'Dimensions': self.dimensions,
+                     'Min': self.min_size,
+                     'Multiplier': self.multiplier,
+                     'Nodes': self.nodes,
+                     'Retries': self.retries,
+                     'Size': self.size,
+                     'Tree': self.tree.data}
         with open(location, 'w') as f:
             f.write(cPickle.dumps(save_data))
+    
+    @classmethod
+    def load(cls, location):
+        with open(location, 'r') as f:
+            file_data = cPickle.loads(f.read())
+        return cls(bounds=file_data['Bounds'],
+                   dimensions=file_data['Dimensions'],
+                   min_size=file_data['Min'],
+                   multiplier=file_data['Multiplier'],
+                   _nodes=file_data['Nodes'],
+                   max_retries=file_data['Retries'],
+                   size=file_data['Size'],
+                   _tree_data=file_data['Tree'])
 
 #Delete previous generation
 try:
@@ -623,20 +643,27 @@ except NameError:
     pass
 
 #Create new generation
-dimensions = 2
+dimensions = 3
 generation = GenerationCore(dimensions, multiplier=0.98)
-generation.generate(max_nodes=100, max_length=100)
+generation.generate(max_nodes=500, max_length=100)
 
-
-
-generation.save()
+file_location = 'C:/Users/Peter/MazeGeneration.cache'
+generation.save(file_location)
+GenerationCore.load(file_location)
 
 #Draw generation in 3D if in Maya
 try:
     draw = MayaDraw(generation)
+    #raise ImportError
 except ImportError:
     pass
 else:
     draw.curves()
     draw.cubes()
     draw.path(0, generation.nodes[-1].id)
+
+'''
+generation.add_branch(2000)
+draw.cubes()
+draw.curves()
+'''
