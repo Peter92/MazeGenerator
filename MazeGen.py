@@ -2,6 +2,231 @@ from __future__ import division
 import random
 import cPickle
 
+def format_location(coordinate, x=0.0, y=0.0, z=0.0):
+    """Turn any coordinates into 3D to be compatible with Maya."""
+    num_coordinates = len(coordinate)
+    if num_coordinates == 0:
+        return(x, y, z)
+    elif num_coordinates == 1:
+        return (coordinate[0], y, z)
+    elif num_coordinates == 2:
+        return (coordinate[0], coordinate[1], z)
+    else:
+        return tuple(coordinate[:3])
+
+
+def format_coordinate(coordinate, links, default_location):
+    """Reformat a coordinate using the new links.
+    For example, the coordinate (-1, 0, 1) with new links as (0, 2, 1)
+    will be reformatted as (-1, 1, 0).
+    Default location is the base coordinate to be used if anything is
+    linked to a non existing value.
+    """
+    
+    dimensions = len(coordinate)
+    
+    #Trim off any unnecessary coordinates
+    n = 0
+    for i in links[::-1]:
+        if i >= dimensions:
+            n += 1
+        else:
+            break
+    if n:
+        links = links[:-n]
+    
+    #Reformat the coordinate
+    new_location = [None for i in links]
+    for i, j in enumerate(links):
+        if j < dimensions:
+            new_location[i] = coordinate[j]
+        else:
+            new_location[i] = default_location[i]
+        
+    return tuple(new_location)
+    
+        
+class MayaDraw(object):
+    """Class to be used for Maya only.
+    It handles building cubes and curves to visualise the maze.
+    """
+    
+    import pymel.core as pm
+    
+    def __init__(self, generation):
+        self._gen = generation
+        self._cubes = []
+        self._curves = []
+        self._paths = []
+        self._bounding_box = None
+        self._links = range(4)
+        self._time_mult = 3
+    
+    def cubes(self):
+        """Draw cubes based on information from the nodes.
+        As neighbour checking is spherical, there may be some 
+        overlapping where corners meet.
+        It is here you interpret the dimensions, where currently it has
+        support for up to 4 (4th is used for keyframes).
+        """
+        
+        self.remove(cubes=True, curves=False, paths=False, bounding_box=False)
+        default_location = self._gen.nodes[0].location
+                
+        for node in self._gen.nodes:
+            size = node.size * 1.98
+            new_location = format_coordinate(node.location, self._links, default_location)
+            
+            #Create new cube
+            new_cube = self.pm.polyCube(n='genCube{}'.format(node.id), w=size, h=size, d=size)[0]
+            self.pm.move(new_cube, format_location(new_location))
+            self._cubes.append(str(new_cube))
+            
+            #Set attributes
+            self.pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
+            self.pm.setAttr('{}.gen_id'.format(new_cube), node.id)
+            self.pm.addAttr(new_cube, sn='gen_dist', ln='GenerationDistance', min=0, at='long')
+            self.pm.setAttr('{}.gen_dist'.format(new_cube), node.distance)
+            self.pm.addAttr(new_cube, sn='gen_parent', ln='GenerationParent', dt='string')
+            self.pm.setAttr('{}.gen_parent'.format(new_cube), str(node.parent))
+            self.pm.addAttr(new_cube, sn='gen_child', ln='GenerationChildren', dt='string')
+            self.pm.setAttr('{}.gen_child'.format(new_cube), ', '.join(map(str, node.children)))
+            self.pm.addAttr(new_cube, sn='gen_adj', ln='GenerationNeighbours', min=0, at='long')
+            self.pm.setAttr('{}.gen_adj'.format(new_cube), node.neighbours)
+            
+            #Set 4th dimension as keys
+            if len(new_location) > 3:
+                time_gap = max(1, node.size * 2 * self._time_mult)
+                time_start = new_location[3] * self._time_mult
+                self.pm.setKeyframe(new_cube, at='v', value=0, time=time_start - time_gap)
+                self.pm.setKeyframe(new_cube, at='v', value=1, time=time_start)
+                self.pm.setKeyframe(new_cube, at='v', value=0, time=time_start + time_gap)
+
+        self.bounding_box(time_slider=True, draw=False)
+
+    
+    def curves(self):
+        """Draw curves by following the path of children.
+        Start a new curve when the next ID is no longer a child.
+        """
+        self.remove(curves=True, cubes=False, paths=False, bounding_box=False)
+        default_location = self._gen.nodes[0].location
+        
+        #Run through all the points
+        curve_list = []
+        for i, node in enumerate(self._gen.nodes):
+            
+            #Start a new curve
+            if node.id not in self._gen.nodes[i-1].children:
+                try:
+                    start_point = self._gen.nodes[self._gen.nodes[i].parent].location
+                    start_point = format_coordinate(start_point, self._links, default_location)
+                except TypeError:
+                    start_point = []
+                curve_list.append([start_point])
+            
+            new_location = format_coordinate(node.location, self._links, default_location)
+            curve_list[-1].append(new_location)
+        
+        #Convert to suitable coordinates and draw
+        for curves in curve_list:
+            if len(curves) > 1:
+                converted_coordinates = [format_location(coordinate) for coordinate in curves]
+                new_curve = self.pm.curve(p=converted_coordinates, d=1) 
+                self._curves.append(str(new_curve))
+
+
+    def path(self, start, end):
+        """Draw path between two nodes."""
+        nodes = self._gen.nodes
+        path = recursive_pathfind(start, end, nodes)
+        if path is None:
+            return
+            
+        curve_points = [format_location(format_coordinate(nodes[node_id].location, 
+                                          self._links, 
+                                          self._gen.nodes[0].location))
+                        for node_id in path]
+        self._paths.append(str(self.pm.curve(p=curve_points, d=5)))
+
+    def bounding_box(self, draw=True, time_slider=False):
+        
+        default_location = self._gen.nodes[0].location
+        bb = [list(format_coordinate(i, self._links, default_location))
+              for i in self._gen.get_bounds()]
+        
+        #Draw the box
+        if draw:
+            self.remove(bounding_box=True, curves=False, cubes=False, paths=False)
+            mid_point = [i / 2 for i in (bb[0][i] + bb[1][i] for i in range(3))]
+            bb_cube = self.pm.polyCube(w=bb[1][0] - bb[0][0],
+                                       h=bb[1][1] - bb[0][1],
+                                       d=bb[1][2] - bb[0][2])
+            self.pm.move(bb_cube[0], mid_point)
+            self._bounding_box = str(bb_cube[0])
+        
+        #Update the time slider
+        if time_slider and self._gen.dimensions > self._links[3]:
+            pm.playbackOptions(min=int(bb[0][3] * self._time_mult - 1), 
+                               max=int(bb[1][3] * self._time_mult) + 2)
+            pm.currentTime(int(bb[0][3] - 1) * self._time_mult)
+        
+        return bb
+
+
+    def change_coordinate_links(self, x=None, y=None, z=None, t=None):
+        """Update coordinate links using the input value.
+        It will attempt to rearrange them based on the input to not 
+        result in any duplicates.
+        See reformat_coordinates() for how the links are used.
+        """
+        available_links = range(4)
+        
+        if x is not None:
+            del available_links[available_links.index(x)]
+        if y is not None:
+            del available_links[available_links.index(y)]
+        if z is not None:
+            del available_links[available_links.index(z)]
+        if t is not None:
+            del available_links[available_links.index(t)]
+        if x is None:
+            x = available_links.pop(0)
+        if y is None:
+            y = available_links.pop(0)
+        if z is None:
+            z = available_links.pop(0)
+        if t is None:
+            t = available_links.pop(0)
+        
+        self._links = [x, y, z, t]
+        
+
+    def remove(self, cubes=True, curves=True, paths=True, bounding_box=True):
+        """Remove any objects created by this class."""
+        scene_objects = set(map(str, self.pm.ls()))
+        delete_objects = []
+        if cubes:
+            for cube in self._cubes:
+                if cube in scene_objects:
+                    delete_objects.append(cube)
+            self._cubes = []
+        if curves:
+            for curve in self._curves:
+                if curve in scene_objects:
+                    delete_objects.append(curve)
+            self._curves = []
+        if paths:
+            for path in self._paths:
+                if path in scene_objects:
+                    delete_objects.append(path)
+            self._paths = []
+        if bounding_box:
+            if self._bounding_box in scene_objects:
+                delete_objects.append(self._bounding_box)
+        self.pm.delete(delete_objects)
+            
+
 class Node(object):
     """Store the data for each node."""
     
@@ -65,135 +290,7 @@ def recursive_pathfind(start, end, node_list, _path=[], _reverse=True, _last_id=
             if found_path is not None:
                 return found_path
     return None
-
-
-
-def format_location(coordinate, x=0.0, y=0.0, z=0.0):
-    """Turn any coordinates into 3D to be compatible with Maya."""
-    num_coordinates = len(coordinate)
-    if num_coordinates == 0:
-        return(x, y, z)
-    elif num_coordinates == 1:
-        return (coordinate[0], y, z)
-    elif num_coordinates == 2:
-        return (coordinate[0], coordinate[1], z)
-    else:
-        return tuple(coordinate[:3])
         
-class MayaDraw(object):
-    """Class to be used for Maya only.
-    It handles building cubes and curves to visualise the maze.
-    """
-    
-    import pymel.core as pm
-    
-    def __init__(self, generation):
-        self._gen = generation
-        self._cubes = []
-        self._curves = []
-        self._paths = []
-    
-    def cubes(self):
-        """Draw cubes based on information from the nodes.
-        As neighbour checking is spherical, there may be some 
-        overlapping where corners meet.
-        It is here you interpret the dimensions, where currently it has
-        support for up to 4 (4th is used for keyframes).
-        """
-        
-        self.remove(cubes=True, curves=False, paths=False)
-        
-        for node in self._gen.nodes:
-            size = node.size * 1.98
-            
-            #Create new cube
-            new_cube = self.pm.polyCube(n='genCube{}'.format(node.id), w=size, h=size, d=size)[0]
-            self.pm.move(new_cube, format_location(node.location))
-            self._cubes.append(new_cube)
-            
-            #Set attributes
-            self.pm.addAttr(new_cube, sn='gen_id', ln='GenerationID', min=0, at='long')
-            self.pm.setAttr('{}.gen_id'.format(new_cube), node.id)
-            self.pm.addAttr(new_cube, sn='gen_dist', ln='GenerationDistance', min=0, at='long')
-            self.pm.setAttr('{}.gen_dist'.format(new_cube), node.distance)
-            self.pm.addAttr(new_cube, sn='gen_parent', ln='GenerationParent', dt='string')
-            self.pm.setAttr('{}.gen_parent'.format(new_cube), str(node.parent))
-            self.pm.addAttr(new_cube, sn='gen_child', ln='GenerationChildren', dt='string')
-            self.pm.setAttr('{}.gen_child'.format(new_cube), ', '.join(map(str, node.children)))
-            self.pm.addAttr(new_cube, sn='gen_adj', ln='GenerationNeighbours', min=0, at='long')
-            self.pm.setAttr('{}.gen_adj'.format(new_cube), node.neighbours)
-            
-            #Set 4th dimension as keys
-            if self._gen.dimensions > 3:
-                time_gap = max(1.5, node.size)
-                self.pm.setKeyframe(new_cube, at='v', value=0, time=node.location[3] - time_gap)
-                self.pm.setKeyframe(new_cube, at='v', value=1, time=node.location[3])
-                self.pm.setKeyframe(new_cube, at='v', value=0, time=node.location[3] + time_gap)
-
-    
-    def curves(self):
-        """Draw curves by following the path of children.
-        Start a new curve when the next ID is no longer a child.
-        """
-        self.remove(curves=True, cubes=False, paths=False)
-        
-        #Run through all the points
-        curve_list = []
-        for i, node in enumerate(self._gen.nodes):
-            
-            #Start a new curve
-            if node.id not in self._gen.nodes[i-1].children:
-                try:
-                    start_point = [self._gen.nodes[self._gen.nodes[i].parent].location]
-                except TypeError:
-                    start_point = []
-                curve_list.append(start_point)
-                
-            curve_list[-1].append(node.location)
-        
-        #Convert to suitable coordinates and draw
-        for curves in curve_list:
-            if len(curves) > 1:
-                converted_coordinates = [format_location(coordinate) for coordinate in curves]
-                new_curve = self.pm.curve(p=converted_coordinates, d=1) 
-                self._curves.append(new_curve)
-
-    def path(self, start, end):
-        """Draw path between two nodes."""
-        nodes = self._gen.nodes
-        path = recursive_pathfind(start, end, nodes)
-        if path is None:
-            return
-        curve_points = [format_location(nodes[node_id].location) for node_id in path]
-        self._paths.append(self.pm.curve(p=curve_points, d=5))
-
-    def remove(self, cubes=True, curves=True, paths=True):
-        """Remove any objects created by this class."""
-        scene_objects = set(self.pm.ls())
-        delete_objects = []
-        if cubes:
-            for cube in self._cubes:
-                if cube == u'None':
-                    print self._cubes
-                if cube in scene_objects:
-                    delete_objects.append(cube)
-            self._cubes = []
-        if curves:
-            for curve in self._curves:
-                if curve == u'None':
-                    print self._curves
-                if curve in scene_objects:
-                    delete_objects.append(curve)
-            self._curves = []
-        if paths:
-            for path in self._paths:
-                if path == u'None':
-                    print self._paths
-                if path in scene_objects:
-                    delete_objects.append(path)
-            self._paths = []
-        for object in delete_objects:
-            self.pm.delete(object)
 
 class CoordinateToSegment(object):
     """Class used for the tree calculations.
@@ -285,7 +382,7 @@ class CoordinateToSegment(object):
             current_amount = pow(2, self.td.size - i - 1)
             
             #Detect whether to end or which way to continue
-            if coordinate == total or coordinate_sort[0] < total < coordinate_sort[1]:
+            if coordinate == total or coordinate_sort[0] <= total <= coordinate_sort[1]:
                 return path
             elif coordinate_sort[1] < total:
                 total -= current_amount
@@ -400,10 +497,10 @@ class GenerationCore(object):
         self.range = range(dimensions)
         self.directions = self._possible_directions()
         
-        self.multiplier = max(0.001, multiplier)
         self.size = max(0.001, size)
         self.bounds = bounds
         self.retries = max_retries
+        self.multiplier = max(0.001, multiplier)
         
         if self.retries is None:
             self.retries = self.dimensions
@@ -437,7 +534,8 @@ class GenerationCore(object):
                 directions.append([j if i == n else 0 for n in self.range])
         return directions
     
-    def generate(self, max_nodes=None, max_length=None, location=None, min_nodes=None, max_fails=500):
+    def generate(self, max_nodes=None, max_length=None, location=None, min_nodes=None, 
+                 max_fails=500):
         """Main function to generate the maze."""
         
         self.nodes = []
@@ -502,6 +600,9 @@ class GenerationCore(object):
                 
     
     def _add_node(self, node_id=None, location=None):
+        """Add individual node to the generation.
+        Needs either a base node or a location to work off.
+        """
         
         if node_id is None:
             if location is None:
@@ -547,8 +648,8 @@ class GenerationCore(object):
         self.tree.add(new_node, node_path)
         return new_id
         
-        
     def add_branch(self, length=1, node_id=None):
+        """Individually add a new branch to the generation."""
         total_directions = len(self.directions)
         
         #Find a node without any neighbours
@@ -563,7 +664,7 @@ class GenerationCore(object):
         while i < length:
             node_status = self._add_node(node_id)
             if node_status == -1 or retries > self.retries:
-                return
+                return i
             elif node_status == -2:
                 retries += 1
                 continue
@@ -571,6 +672,7 @@ class GenerationCore(object):
                 node_id = node_status
                 retries = 0
                 i += 1
+        return i
     
     
     def collision_check(self, location, size, bounds=None, node_ids=None):
@@ -636,6 +738,26 @@ class GenerationCore(object):
                    size=file_data['Size'],
                    _tree_data=file_data['Tree'])
 
+    def get_bounds(self):
+        """Find the bounds of the generation, including the node size."""
+        bounds = [[float('inf') for i in range(self.dimensions)], 
+                  [-float('inf') for i in range(self.dimensions)]]
+        for node in self.nodes:
+            for i, coordinate in enumerate(node.location):
+                if bounds[0][i] > coordinate:
+                    try:
+                        bounds[0][i] = coordinate - node.size[i]
+                    except TypeError:
+                        bounds[0][i] = coordinate - node.size
+                elif bounds[1][i] < coordinate:
+                    try:
+                        bounds[1][i] = coordinate + node.size[i]
+                    except TypeError:
+                        bounds[1][i] = coordinate + node.size
+        bounds = tuple(tuple(i) for i in bounds)
+        return bounds
+        
+
 #Delete previous generation
 try:
     draw.remove()
@@ -643,27 +765,25 @@ except NameError:
     pass
 
 #Create new generation
-dimensions = 3
+dimensions = 4
 generation = GenerationCore(dimensions, multiplier=0.98)
-generation.generate(max_nodes=500, max_length=100)
+generation.generate(min_nodes=500, max_length=100, max_fails=2000)
+generation.add_branch(100)
 
-file_location = 'C:/Users/Peter/MazeGeneration.cache'
-generation.save(file_location)
-GenerationCore.load(file_location)
+#Save/load generation
+if False:
+    import os
+    file_location = os.path.expanduser('~') + '/MazeGen.cache'
+    generation.save(file_location)
+    generation = GenerationCore.load(file_location)
 
 #Draw generation in 3D if in Maya
 try:
     draw = MayaDraw(generation)
-    #raise ImportError
 except ImportError:
     pass
 else:
-    draw.curves()
+    draw.change_coordinate_links(x=3, t=2)
     draw.cubes()
+    draw.curves()
     draw.path(0, generation.nodes[-1].id)
-
-'''
-generation.add_branch(2000)
-draw.cubes()
-draw.curves()
-'''
