@@ -2,29 +2,16 @@ from __future__ import division
 import random
 import cPickle
 
-def format_location(coordinate, x=0.0, y=0.0, z=0.0):
-    """Turn any coordinates into 3D to be compatible with Maya."""
-    num_coordinates = len(coordinate)
-    if num_coordinates == 0:
-        return(x, y, z)
-    elif num_coordinates == 1:
-        return (coordinate[0], y, z)
-    elif num_coordinates == 2:
-        return (coordinate[0], coordinate[1], z)
-    else:
-        return tuple(coordinate[:3])
-
-
-def format_coordinate(coordinate, links, default_location):
+def format_coordinate(coordinate, links, default_location=[], default_value=0.0):
     """Reformat a coordinate using the new links.
-    For example, the coordinate (-1, 0, 1) with new links as (0, 2, 1)
-    will be reformatted as (-1, 1, 0).
-    Default location is the base coordinate to be used if anything is
-    linked to a non existing value.
+    For example, the coordinate (-1.0, 0.0, 1.0) with new links as (1, 2, 0, 3)
+    will be reformatted as [0.0, 1.0, -1.0, 0.0].
+    Always returns a list of len(links) values.
     """
     
     dimensions = len(coordinate)
     
+    '''
     #Trim off any unnecessary coordinates
     n = 0
     for i in links[::-1]:
@@ -34,6 +21,7 @@ def format_coordinate(coordinate, links, default_location):
             break
     if n:
         links = links[:-n]
+    '''
     
     #Reformat the coordinate
     new_location = [None for i in links]
@@ -41,9 +29,12 @@ def format_coordinate(coordinate, links, default_location):
         if j < dimensions:
             new_location[i] = coordinate[j]
         else:
-            new_location[i] = default_location[i]
+            try:
+                new_location[i] = default_location[i]
+            except:
+                new_location[i] = default_value
         
-    return tuple(new_location)
+    return new_location
     
         
 class MayaDraw(object):
@@ -79,7 +70,7 @@ class MayaDraw(object):
             
             #Create new cube
             new_cube = self.pm.polyCube(n='genCube{}'.format(node.id), w=size, h=size, d=size)[0]
-            self.pm.move(new_cube, format_location(new_location))
+            self.pm.move(new_cube, new_location[:3])
             self._cubes.append(str(new_cube))
             
             #Set attributes
@@ -95,7 +86,7 @@ class MayaDraw(object):
             self.pm.setAttr('{}.gen_adj'.format(new_cube), node.neighbours)
             
             #Set 4th dimension as keys
-            if len(new_location) > 3:
+            if self._gen.dimensions > self._links[3]:
                 time_gap = max(1, node.size * 2 * self._time_mult)
                 time_start = new_location[3] * self._time_mult
                 self.pm.setKeyframe(new_cube, at='v', value=0, time=time_start - time_gap)
@@ -120,18 +111,18 @@ class MayaDraw(object):
             if node.id not in self._gen.nodes[i-1].children:
                 try:
                     start_point = self._gen.nodes[self._gen.nodes[i].parent].location
-                    start_point = format_coordinate(start_point, self._links, default_location)
+                    start_point = format_coordinate(start_point, self._links, default_location)[:3]
                 except TypeError:
                     start_point = []
                 curve_list.append([start_point])
             
-            new_location = format_coordinate(node.location, self._links, default_location)
+            new_location = format_coordinate(node.location, self._links, default_location)[:3]
             curve_list[-1].append(new_location)
         
         #Convert to suitable coordinates and draw
         for curves in curve_list:
             if len(curves) > 1:
-                converted_coordinates = [format_location(coordinate) for coordinate in curves]
+                converted_coordinates = [coordinate for coordinate in curves if coordinate]
                 new_curve = self.pm.curve(p=converted_coordinates, d=1) 
                 self._curves.append(str(new_curve))
 
@@ -143,16 +134,16 @@ class MayaDraw(object):
         if path is None:
             return
             
-        curve_points = [format_location(format_coordinate(nodes[node_id].location, 
+        curve_points = [format_coordinate(nodes[node_id].location, 
                                           self._links, 
-                                          self._gen.nodes[0].location))
+                                          self._gen.nodes[0].location)[:3]
                         for node_id in path]
         self._paths.append(str(self.pm.curve(p=curve_points, d=5)))
 
     def bounding_box(self, draw=True, time_slider=False):
         
         default_location = self._gen.nodes[0].location
-        bb = [list(format_coordinate(i, self._links, default_location))
+        bb = [format_coordinate(i, self._links, default_location)
               for i in self._gen.get_bounds()]
         
         #Draw the box
@@ -178,7 +169,7 @@ class MayaDraw(object):
         """Update coordinate links using the input value.
         It will attempt to rearrange them based on the input to not 
         result in any duplicates.
-        See reformat_coordinates() for how the links are used.
+        See format_coordinates() for how the links are used.
         """
         available_links = range(4)
         
@@ -623,8 +614,8 @@ class GenerationCore(object):
                 return -1
                 
             direction = random.choice(self.directions)
-            new_location = tuple(a + b * node_start.size * 2 for a, b 
-                                 in zip(node_start.location, direction))
+            new_location = tuple(a + b * node_start.size * 2 * max(1, self.multiplier)
+                                 for a, b in zip(node_start.location, direction))
              
         #Check tree for collisions
         node_path = self.tree.calculate(new_location, new_size)
@@ -774,7 +765,7 @@ generation.add_branch(100)
 if False:
     import os
     file_location = os.path.expanduser('~') + '/MazeGen.cache'
-    generation.save(file_location)
+    generation.save(file_locationz)
     generation = GenerationCore.load(file_location)
 
 #Draw generation in 3D if in Maya
