@@ -36,7 +36,7 @@ def format_coordinate(coordinate, links, default_location=[], default_value=0.0)
         
     return new_location
     
-        
+
 class MayaDraw(object):
     """Class to be used for Maya only.
     It handles building cubes and curves to visualise the maze.
@@ -49,11 +49,12 @@ class MayaDraw(object):
         self._cubes = []
         self._curves = []
         self._paths = []
+        self._shaders = []
         self._bounding_box = None
         self._links = range(4)
         self._time_mult = 3
     
-    def cubes(self):
+    def cubes(self, colours=None, amount=20):
         """Draw cubes based on information from the nodes.
         As neighbour checking is spherical, there may be some 
         overlapping where corners meet.
@@ -61,7 +62,7 @@ class MayaDraw(object):
         support for up to 4 (4th is used for keyframes).
         """
         
-        self.remove(cubes=True, curves=False, paths=False, bounding_box=False)
+        self.remove(cubes=True, curves=False, paths=False, shaders=True, bounding_box=False)
         default_location = self._gen.nodes[0].location
                 
         for node in self._gen.nodes:
@@ -92,6 +93,24 @@ class MayaDraw(object):
                 self.pm.setKeyframe(new_cube, at='v', value=0, time=time_start - time_gap)
                 self.pm.setKeyframe(new_cube, at='v', value=1, time=time_start)
                 self.pm.setKeyframe(new_cube, at='v', value=0, time=time_start + time_gap)
+        
+        if colours is None:
+            colours = ['black', 'white']
+        self.update_colours(colours, amount)
+        
+        
+    def update_colours(self, colours, amount=20):
+        
+        shader_name = self._shader_build(colours, amount)
+        
+        increment = (amount - 1) / self._gen.highest
+        for cube in self._cubes:
+            distance = self.pm.getAttr('{}.gen_dist'.format(cube)) * increment
+            i = int(round(distance))
+            pm.defaultNavigation(source=shader_name.format(i), 
+                                 destination='|{c}|{c}Shape.instObjGroups[0]'.format(c=cube), 
+                                 connectToExisting=True)
+            
 
         self.bounding_box(time_slider=True, draw=False)
 
@@ -100,7 +119,7 @@ class MayaDraw(object):
         """Draw curves by following the path of children.
         Start a new curve when the next ID is no longer a child.
         """
-        self.remove(curves=True, cubes=False, paths=False, bounding_box=False)
+        self.remove(curves=True, cubes=False, paths=False, shaders=False, bounding_box=False)
         default_location = self._gen.nodes[0].location
         
         #Run through all the points
@@ -148,7 +167,7 @@ class MayaDraw(object):
         
         #Draw the box
         if draw:
-            self.remove(bounding_box=True, curves=False, cubes=False, paths=False)
+            self.remove(bounding_box=True, curves=False, cubes=False, paths=False, shaders=False)
             mid_point = [i / 2 for i in (bb[0][i] + bb[1][i] for i in range(3))]
             bb_cube = self.pm.polyCube(w=bb[1][0] - bb[0][0],
                                        h=bb[1][1] - bb[0][1],
@@ -193,7 +212,7 @@ class MayaDraw(object):
         self._links = [x, y, z, t]
         
 
-    def remove(self, cubes=True, curves=True, paths=True, bounding_box=True):
+    def remove(self, cubes=True, curves=True, paths=True, shaders=True, bounding_box=True):
         """Remove any objects created by this class."""
         scene_objects = set(map(str, self.pm.ls()))
         delete_objects = []
@@ -212,10 +231,128 @@ class MayaDraw(object):
                 if path in scene_objects:
                     delete_objects.append(path)
             self._paths = []
+        if shaders:
+            for shader in self._shaders:
+                if shader in scene_objects:
+                    delete_objects.append(shader)
+            self._shaders = []
         if bounding_box:
             if self._bounding_box in scene_objects:
                 delete_objects.append(self._bounding_box)
         self.pm.delete(delete_objects)
+        
+        
+    def _colour_build(self):
+        """Build a dictionary of colours."""
+        
+        colour_core = {'BLACK': ((0, 0, 0), 'blk'),
+                       'WHITE': ((1, 1, 1), 'wht')}
+        colour_main = {'RED': ((1, 0, 0), 'red'),
+                       'GREEN': ((0, 1, 0), 'grn'),
+                       'BLUE': ((0, 0, 1), 'blu'),
+                       'YELLOW': ((1, 1, 0), 'ylw'),
+                       'MAGENTA': ((1, 0, 1), 'mgt'),
+                       'CYAN':((0, 1, 1), 'cyn')}
+        colour_extra = {'ORANGE': ((1, 0.5, 0), 'org'),
+                        'PURPLE': ((0.5, 0, 0.5), 'ppl'),
+                        'GREY': ((0.5, 0.5, 0.5), 'gry'),
+                        'BROWN': ((0.3, 0.2, 0), 'brn')}
+    
+        for name, values in dict(colour_main).iteritems():
+            value = tuple({0: 0, 1: 0.5}[i] for i in values[0])
+            colour_main['DARK{}'.format(name)] = (value, 'd{}'.format(values[1]))
+            
+            value = tuple({0: 0.5, 1: 1}[i] for i in values[0])
+            colour_main['LIGHT{}'.format(name)] = (value, 'l{}'.format(values[1]))
+        
+        for name, values in dict(colour_extra).iteritems():
+            value = tuple({0: 0, 0.2: 0.1, 0.3: 0.2, 0.5: 0.3, 0.7: 0.6, 0.8: 0.7, 1: 1}[i] for i in values[0])
+            colour_extra['DARK{}'.format(name)] = (value, 'd{}'.format(values[1]))
+            
+            value = tuple({0: 0, 0.2: 0.3, 0.3: 0.4, 0.5: 0.7, 0.7: 0.8, 0.8: 0.9, 1: 1}[i] for i in values[0])
+            colour_extra['LIGHT{}'.format(name)] = (value, 'l{}'.format(values[1]))
+        
+        result = {}
+        result.update(colour_core)
+        result.update(colour_main)
+        result.update(colour_extra)
+        return result
+    
+    def _colour_transition(self, colours, amount):
+        """Create a transition between colours.
+        Input must be in (R, G, B) format.
+        """
+        
+        if len(colours) == 1:
+            return [colours[0]] * amount
+            
+        amount -= 1
+        increment = amount / (len(colours) - 1)
+        
+        result = []
+        for i in range(amount):
+            
+            progress = i / increment
+            colour_index = int(progress)
+            colour_percentage = progress % 1
+            
+            colour_current = colours[colour_index]
+            colour_next = colours[colour_index + 1]
+            difference = [colour_next[0] - colour_current[0],
+                          colour_next[1] - colour_current[1],
+                          colour_next[2] - colour_current[2]]
+            difference = [i * colour_percentage for i in difference]
+            result.append(tuple(i + j for i, j in zip(colour_current, difference)))
+            
+        result.append(colours[-1])
+        return result
+
+    def _shader_build(self, colours, amount):
+        """Create the shaders."""
+        
+        #Get colour values from input
+        colour_dict = self._colour_build()
+        valid_colours = []
+        for name in colours:
+            name_format = name.replace(' ','').upper()
+            try:
+                valid_colours.append(colour_dict[name_format])
+            except KeyError:
+                pass
+        if not valid_colours:
+            raise ValueError('no valid colours input')
+            
+        #Format name
+        name_base = ''.join(name.capitalize() for rgb, name in valid_colours)
+        name_surface = "surface{}{}{}".format(name_base, amount, 'n{}')
+        name_base = name_base[0].lower() + name_base[1:]
+        name_shader = '{}{}{}'.format(name_base, amount, 'n{}')
+        
+        #Delete duplicate shaders
+        scene_objects = set(map(str, self.pm.ls()))
+        delete_list = []
+        if name_shader.format(0) in scene_objects:
+            for i in range(amount):
+                existing_shader = name_shader.format(i)
+                if existing_shader in scene_objects:
+                    delete_list.append(existing_shader)
+        if delete_list:
+            self.pm.delete(delete_list)
+                    
+        transitions = self._colour_transition([rgb for rgb, name in valid_colours], amount)
+        for i, colour in enumerate(transitions):
+            
+            #Create shader
+            new_shader = self.pm.shadingNode('lambert', asShader=True, name=name_shader.format(i))
+            new_shader.color.set(colour, type='double3')
+            
+            #Link with surfaceshader
+            new_surface = self.pm.sets(renderable=True, noSurfaceShader=True, empty=True, name=name_surface.format(i))
+            self.pm.connectAttr(new_shader.outColor, new_surface.surfaceShader)
+            
+            self._shaders.append(new_shader)
+        
+        return name_shader
             
 
 class Node(object):
@@ -492,6 +629,7 @@ class GenerationCore(object):
         self.bounds = bounds
         self.retries = max_retries
         self.multiplier = max(0.001, multiplier)
+        self.highest = 0
         
         if self.retries is None:
             self.retries = self.dimensions
@@ -633,6 +771,8 @@ class GenerationCore(object):
         #Create a new node
         new_node = Node(new_id, new_location, new_size, neighbours=node_id is not None)
         new_node.update_parent(node_id, self.nodes)
+        if new_node.distance > self.highest:
+            self.highest = new_node.distance
         
         #Update values with new node
         self.nodes.append(new_node)
@@ -765,7 +905,7 @@ generation.add_branch(100)
 if False:
     import os
     file_location = os.path.expanduser('~') + '/MazeGen.cache'
-    generation.save(file_locationz)
+    generation.save(file_location)
     generation = GenerationCore.load(file_location)
 
 #Draw generation in 3D if in Maya
@@ -775,6 +915,6 @@ except ImportError:
     pass
 else:
     draw.change_coordinate_links(x=3, t=2)
-    draw.cubes()
+    draw.cubes(amount=30)
     draw.curves()
     draw.path(0, generation.nodes[-1].id)
