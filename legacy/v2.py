@@ -42,9 +42,9 @@ class MayaDraw(object):
     It handles building cubes and curves to visualise the maze.
     """
     
-    import pymel.core as pm
-    
     def __init__(self, generation):
+        import pymel.core as pm
+        self.pm = pm
         self._gen = generation
         self._cubes = []
         self._curves = []
